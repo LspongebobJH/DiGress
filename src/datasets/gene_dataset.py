@@ -16,7 +16,7 @@ class GeneDataset(InMemoryDataset):
     def __init__(self, dataset_name=None, split=None, root=None, transform=None, pre_transform=None, pre_filter=None):
         self.gene_expr_path = 'data/dream5/dream5_data'
         super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.data = torch.load(self.processed_paths[0])
 
     @property
     def raw_dir(self):
@@ -25,9 +25,6 @@ class GeneDataset(InMemoryDataset):
     @property
     def raw_file_names(self):
         return []
-
-    def download(self):
-        pass
 
     @property
     def processed_dir(self):
@@ -39,11 +36,13 @@ class GeneDataset(InMemoryDataset):
     
     def process(self):
         files = os.listdir(self.raw_dir)
-        data_list = []
+        data_dict = {}
         for filename in tqdm(files):
             if filename.endswith('.mat') or '_ND_' in filename or filename == 'network_all.pt':
                 continue
             net_idx = int(re.search(r'network_(\d+)_', filename).group(1))
+            if net_idx not in data_dict.keys():
+                data_dict[net_idx] = []
             gene_expr_path = os.path.join(self.gene_expr_path, f'net{net_idx}_expression_data.tsv')
             gene_expr = torch.tensor(pd.read_csv(gene_expr_path, sep = '\t').T.to_numpy())
             adj_path = os.path.join(self.raw_dir, filename)
@@ -56,25 +55,20 @@ class GeneDataset(InMemoryDataset):
             data = torch_geometric.data.Data(x=gene_expr, edge_index=edge_index, edge_attr=edge_attr,
                                                 y=y, n_nodes=num_nodes)
 
-            data_list.append(data)
-        torch.save(self.collate(data_list), self.processed_paths[0]) # TODO(jiahang): problem!
+            data_dict[net_idx].append(data)
+
+        new_data_list = []
+        for net_idx, data_list in data_dict.items():
+            data_obj = self.collate(data_list)
+            new_data_list.append(data_obj)
+
+        torch.save(new_data_list, self.processed_paths[0]) # TODO(jiahang): problem!
 
 
-class SpectreGraphDataModule(AbstractDataModule):
+class GeneDataModule(AbstractDataModule):
     def __init__(self, cfg, n_graphs=200):
         self.cfg = cfg
-        self.datadir = cfg.dataset.datadir
-        base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
-        root_path = os.path.join(base_path, self.datadir)
-
-
-        datasets = {'train': SpectreGraphDataset(dataset_name=self.cfg.dataset.name,
-                                                 split='train', root=root_path),
-                    'val': SpectreGraphDataset(dataset_name=self.cfg.dataset.name,
-                                        split='val', root=root_path),
-                    'test': SpectreGraphDataset(dataset_name=self.cfg.dataset.name,
-                                        split='test', root=root_path)}
-        # print(f'Dataset sizes: train {train_len}, val {val_len}, test {test_len}')
+        datasets = {'train': GeneDataModule(), 'val': GeneDataModule, 'test': GeneDataModule}
 
         super().__init__(cfg, datasets)
         self.inner = self.train_dataset
