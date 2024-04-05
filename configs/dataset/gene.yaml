@@ -1,0 +1,6 @@
+name: gene
+idx: 1
+remove_h: null
+network_dir: 'data/ND-code-datasets/Application1-gene-regulatory-network/networks'
+gene_expr_dir: 'data/dream5/dream5_data'
+force_reload: False

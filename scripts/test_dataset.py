@@ -1,5 +1,12 @@
-from src.datasets.gene_dataset import GeneDataset
+from src.datasets.gene_dataset import GeneDataModule, GeneDatasetInfos
+import hydra
+from omegaconf import DictConfig
 
-datamodule = GeneDataset()
+@hydra.main(version_base='1.3', config_path='../configs', config_name='config')
+def main(cfg: DictConfig):
+    datamodule = GeneDataModule(cfg)
+    dataset_infos = GeneDatasetInfos(datamodule, cfg['dataset'])
 
-pass
+    pass 
+
+main()
