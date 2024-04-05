@@ -1,0 +1,4 @@
+name: protein
+remove_h: null
+network_dir: 'data/ND-code-datasets/Application2-protein-contact-maps/full-predictions'
+force_reload: False

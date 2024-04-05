@@ -90,7 +90,9 @@ class SpectreGraphDataset(InMemoryDataset):
             num_nodes = n * torch.ones(1, dtype=torch.long)
             data = torch_geometric.data.Data(x=X, edge_index=edge_index, edge_attr=edge_attr,
                                              y=y, n_nodes=num_nodes)
-            data_list.append(data)
+            # NOTE(Jiahang): here is a potential bug - author appends the same graph twices.
+            ## Theoretically it won't affect the performance.
+            # data_list.append(data) 
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue

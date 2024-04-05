@@ -16,15 +16,14 @@ from torch_geometric.data.dataset import _repr, files_exist
 
 from src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 
+# TODO(jiahang): train-valid-test split not implemented yet
 
-class GeneDataset(InMemoryDataset):
-    def __init__(self, idx, root, gene_expr_path, 
-                 dataset_name='gene', transform=None, pre_transform=None, pre_filter=None, 
+class ProteinDataset(InMemoryDataset):
+    def __init__(self, root, 
+                 dataset_name='protein', transform=None, pre_transform=None, pre_filter=None, 
                  force_reload=False):
         self.dataset_name = dataset_name
-        self.gene_expr_path = gene_expr_path
         self.network_path = root
-        self.idx = idx
         self.force_reload = force_reload
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
@@ -43,7 +42,7 @@ class GeneDataset(InMemoryDataset):
     
     @property
     def processed_file_names(self):
-        return [f'network_all_{self.idx}.pt']
+        return [f'network_all.pt']
 
     def _process(self):
         # taken from PyG original implementations
@@ -87,23 +86,20 @@ class GeneDataset(InMemoryDataset):
         files = os.listdir(self.raw_dir)
         data_list = []
         for filename in tqdm(files):
-            if filename.endswith('.mat') or filename.endswith('.pt') or'_ND_' in filename:
+            if filename.endswith('.mat') or filename.endswith('.pt') or'_ND_' in filename \
+                or ('DI_' not in filename and 'MI_' not in filename):
                 continue
-            net_idx = int(re.search(r'network_(\d+)_', filename).group(1))
-            if net_idx != self.idx:
-                continue
-            gene_expr_path = os.path.join(self.gene_expr_path, f'net{net_idx}_expression_data.tsv')
-            gene_expr = torch.tensor(pd.read_csv(gene_expr_path, sep = '\t').T.to_numpy())
             adj_path = os.path.join(self.raw_dir, filename)
-            adj = torch.tensor(np.load(adj_path)) # TODO(jiahang): asymmetric, directed graph, re-consider it
+            adj = torch.tensor(np.load(adj_path))
             adj = self.maxmin_norm(adj)
             edge_index, edge_prob = torch_geometric.utils.dense_to_sparse(adj)
             edge_attr = torch.zeros(edge_index.shape[-1], 2, dtype=torch.float)
             edge_attr[:, 1] = edge_prob
             edge_attr[:, 0] = 1. - edge_prob
-            num_nodes = gene_expr.shape[0]
+            num_nodes = adj.shape[0]
+            X = torch.ones(num_nodes, 1, dtype=torch.float)
             y = torch.zeros([1, 0]).float() # TODO(jiahang): what's this?
-            data = torch_geometric.data.Data(x=gene_expr, edge_index=edge_index, edge_attr=edge_attr,
+            data = torch_geometric.data.Data(x=X, edge_index=edge_index, edge_attr=edge_attr,
                                                 y=y, n_nodes=num_nodes)
 
             data_list.append(data)
@@ -115,25 +111,19 @@ class GeneDataset(InMemoryDataset):
         return data
 
 
-class GeneDataModule(AbstractDataModule):
+class ProteinDataModule(AbstractDataModule):
     def __init__(self, cfg):
         self.cfg = cfg
         self.network_dir = cfg.dataset.network_dir
-        self.gene_expr_dir = cfg.dataset.gene_expr_dir
         base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         network_path = os.path.join(base_path, self.network_dir)
-        gene_expr_path = os.path.join(base_path, self.gene_expr_dir)
 
-        datasets = {'train': GeneDataset(idx=self.cfg.dataset.idx, 
-                                         root=network_path, 
-                                         gene_expr_path=gene_expr_path,
-                                         force_reload=self.cfg.dataset.force_reload), 
-                    'val': GeneDataset(idx=self.cfg.dataset.idx, 
-                                       root=network_path, 
-                                       gene_expr_path=gene_expr_path),
-                    'test': GeneDataset(idx=self.cfg.dataset.idx, 
-                                        root=network_path, 
-                                        gene_expr_path=gene_expr_path)
+        datasets = {'train': ProteinDataset(root=network_path, 
+                                            force_reload=self.cfg.dataset.force_reload), 
+                    'val': ProteinDataset(root=network_path, 
+                                          force_reload=self.cfg.dataset.force_reload), 
+                    'test': ProteinDataset(root=network_path, 
+                                            force_reload=self.cfg.dataset.force_reload)
                     }
 
         super().__init__(cfg, datasets)
@@ -143,7 +133,7 @@ class GeneDataModule(AbstractDataModule):
         return self.inner[item]
 
 # TODO(jiahang): not working
-class GeneDatasetInfos(AbstractDatasetInfos):
+class ProteinDatasetInfos(AbstractDatasetInfos):
     def __init__(self, datamodule, dataset_config):
         self.datamodule = datamodule
         self.name = datamodule.train_dataset.dataset_name
