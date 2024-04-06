@@ -132,7 +132,6 @@ class ProteinDataModule(AbstractDataModule):
     def __getitem__(self, item):
         return self.inner[item]
 
-# TODO(jiahang): not working
 class ProteinDatasetInfos(AbstractDatasetInfos):
     def __init__(self, datamodule, dataset_config):
         self.datamodule = datamodule

@@ -92,6 +92,8 @@ class GeneDataset(InMemoryDataset):
             net_idx = int(re.search(r'network_(\d+)_', filename).group(1))
             if net_idx != self.idx:
                 continue
+            # TODO(jiahang): gene expression data is unnecessary, since node features used by graph transformer
+            ## are only one-hot vectors of categories, edge features the same. 
             gene_expr_path = os.path.join(self.gene_expr_path, f'net{net_idx}_expression_data.tsv')
             gene_expr = torch.tensor(pd.read_csv(gene_expr_path, sep = '\t').T.to_numpy())
             adj_path = os.path.join(self.raw_dir, filename)
