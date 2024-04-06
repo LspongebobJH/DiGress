@@ -98,6 +98,37 @@ def main(cfg: DictConfig):
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
                         'extra_features': extra_features, 'domain_features': domain_features}
+        
+    elif dataset_config["name"] == 'protein':
+        # NOTE(jiahang): adapted from general graph
+        from datasets import protein_dataset
+        from analysis.visualization import NonMolecularVisualization
+        from metrics.dummy_metrics import DummySamplingMetrics
+
+        datamodule = protein_dataset.ProteinDataModule(cfg)
+        dataset_infos = protein_dataset.ProteinDatasetInfos(datamodule, dataset_config)
+        train_metrics = TrainAbstractMetricsDiscrete() if cfg.model.type == 'discrete' else TrainAbstractMetrics()
+        visualization_tools = NonMolecularVisualization()
+        if cfg.model.type == 'discrete' and cfg.model.extra_features is not None:
+            extra_features = ExtraFeatures(cfg.model.extra_features, dataset_info=dataset_infos)
+        else:
+            extra_features = DummyExtraFeatures()
+        domain_features = DummyExtraFeatures()
+        sampling_metrics = DummySamplingMetrics()
+
+        # TODO(jiahang): here the extra_features will be conducted to compute dimensions of [x || extra_feature]
+        ## not affecting actual model training
+        ## However, only weighted adj is given here rather than the discrete graph itself in our cases
+        ## But extra_feature can still be applied to reverse diffusion in our cases
+        ## For now: skip extra_feature
+        ## Future fix: build a dummy graph with the same dimension to compute dims.
+        dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
+                                                domain_features=domain_features)
+
+        model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
+                        'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
+                        'extra_features': extra_features, 'domain_features': domain_features}
+
 
     elif dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
         from metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics
@@ -147,6 +178,7 @@ def main(cfg: DictConfig):
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
                         'extra_features': extra_features, 'domain_features': domain_features}
+    
     else:
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
