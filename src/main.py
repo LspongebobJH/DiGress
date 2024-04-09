@@ -27,6 +27,11 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
+    from torch.distributed import init_process_group
+    import os
+    os.environ['MASTER_ADDR']='localhost'
+    os.environ['MASTER_PORT']='12345'
+    init_process_group(backend='nccl', init_method='env://', rank=0, world_size=1)
     if cfg.model.type == 'discrete':
         model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
     else:
@@ -120,6 +125,7 @@ def main(cfg: DictConfig):
         ## not affecting actual model training
         ## However, only weighted adj is given here rather than the discrete graph itself in our cases
         ## But extra_feature can still be applied to reverse diffusion in our cases
+        ##
         ## For now: skip extra_feature
         ## Future fix: build a dummy graph with the same dimension to compute dims.
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
@@ -220,7 +226,7 @@ def main(cfg: DictConfig):
 
     use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
     trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
-                      strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
+                    #   strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
                       accelerator='gpu' if use_gpu else 'cpu',
                       devices=cfg.general.gpus if use_gpu else 1,
                       max_epochs=cfg.train.n_epochs,

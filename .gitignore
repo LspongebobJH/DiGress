@@ -155,3 +155,4 @@ src/analysis/orca/orca
 src/analysis/orca/tmp*
 
 .vscode/
+chain_results/
