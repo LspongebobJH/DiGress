@@ -16,35 +16,6 @@ from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from metrics.protein_metrics import LPMetric
 from src import utils
 
-def get_pred_true(masked_pred_E, true_E):
-    """ adapted from TrainLossDiscrete.forward()
-    
-    masked_pred_E : tensor -- (bs, n, n, de)
-    true_E : tensor -- (bs, n, n, de)
-    """
-
-    from torch.nn.functional import softmax
-
-    true_E = torch.reshape(true_E, (-1, true_E.size(-1)))  # (bs * n * n, de)
-    masked_pred_E = torch.reshape(masked_pred_E, (-1, masked_pred_E.size(-1)))   # (bs * n * n, de)
-
-    # Remove masked rows
-    mask_E = (true_E != 0.).any(dim=-1)
-    flat_true_E = true_E[mask_E, :]
-    flat_pred_E = masked_pred_E[mask_E, :]
-
-    softmax_flat_pred_E = softmax(flat_pred_E, dim=1)
-    argmax_flat_true_E = flat_true_E.argmax(dim=1) # NOTE(jiahang): take 0.5 as threshold, just for testing
-
-    pred_E_positive = softmax_flat_pred_E[:, 1]
-    true_E = argmax_flat_true_E
-    true_E_logits = flat_true_E[:, 1]
-
-    pred_true_label = torch.stack([pred_E_positive, true_E])
-    pred_true_logit = torch.stack([pred_E_positive, true_E_logits])
-
-    return pred_true_label, pred_true_logit
-
 def get_true(true_E):
     """ adapted from TrainLossDiscrete.forward()
     
@@ -145,8 +116,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             
         # NOTE(jiahang): to compute metrics relevant to link prediction
         self.lp_metric_valid = LPMetric(stage='val')
-        
         self.lp_metric_test = LPMetric(stage='test')
+        self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test}
 
         self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
         self.start_epoch_time = None
@@ -219,21 +190,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         pred = self.forward(noisy_data, extra_data, node_mask)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
 
-        # NOTE(jiahang): aggregate results for computing auroc and cross entropy of p(X|G^t)
-        true_label, true_logits = get_true(dense_data.E)
+        self.update_lp_metrics(dense_data, data, node_mask, 'valid')
         
-        # NOTE(jiahang): collect G^T of all samples so that we can measure the generation performance of the reverse process
-        ## P(G^t-1 | G^t) vs X
-        ## This is a hack, dirty codes
-        noisy_data_T = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, timestamp=self.T)
-        E_T = noisy_data_T['E_t']
-        chain_E_Gt_1_Gt, chain_E_X_Gt = self.sample_chain_E(E_T, node_mask)
-
-        mask_E = (dense_data.E != 0.).any(dim=-1).cpu()
-        chain_E_Gt_1_Gt = chain_E_Gt_1_Gt[:, mask_E] # P(G^t-1 | G^t)
-        chain_E_X_Gt = chain_E_X_Gt[:, mask_E] # P(X | G^t)
-        self.lp_metric_valid(true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
-
         return {'loss': nll}
 
     def on_validation_epoch_end(self) -> None:
@@ -245,18 +203,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        "val/E_kl": metrics[2],
                        "val/X_logp": metrics[3],
                        "val/E_logp": metrics[4]}, commit=False)
-            
-        chain_metrics_Gt_1_Gt, chain_metrics_X_Gt = self.lp_metric_valid.compute()
 
-        if self.cfg.general.save_chain_results and self.current_epoch % self.cfg.general.save_chain_every_epochs == 0:
-            _dir = os.path.join(self.cfg.general.save_chain_results, self.name)
-            if not os.path.exists(_dir):
-                os.makedirs(_dir)
-            with open(os.path.join(_dir, f"{self.current_epoch}_Gt_1_Gt.pkl"), 'wb') as f:
-                pickle.dump(chain_metrics_Gt_1_Gt, f)
-            with open(os.path.join(_dir, f"{self.current_epoch}_X_Gt.pkl"), 'wb') as f:
-                pickle.dump(chain_metrics_X_Gt, f)
-
+        self.compute_lp_metrics('valid')
 
         self.print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
                    f"Val Edge type KL: {metrics[2] :.2f}")
@@ -318,17 +266,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         pred = self.forward(noisy_data, extra_data, node_mask)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
 
-        # NOTE(jiahang): aggregate results for computing auroc and cross entropy of p(X|G^t)
-        pred_true = get_pred_true(pred.E, dense_data.E)
-        
-        # NOTE(jiahang): collect G^T of all samples so that we can measure the generation performance of the reverse process
-        ## P(G^t-1 | G^t) vs X
-        ## This is a hack, dirty codes
-        noisy_data_T = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, timestamp=self.T)
-        E_T = noisy_data_T['E_t']
-        chain_E = self.sample_chain_E(E_T, node_mask)
-        
-        self.lp_metric_test(pred_true, chain_E)
+        self.update_lp_metrics(dense_data, data, node_mask, 'test')
         
         return {'loss': nll}
 
@@ -343,9 +281,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        "test/X_logp": metrics[3],
                        "test/E_logp": metrics[4]}, commit=False)
             
-        lp_metrics = self.lp_metric_test.compute()
-        if wandb.run:
-            wandb.log(lp_metrics, commit=False)
+        self.compute_lp_metrics('test')
 
         self.print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
                    f"Test Edge type KL: {metrics[2] :.2f}")
@@ -810,5 +746,35 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
 
+
+    def update_lp_metrics(self, dense_data, data, node_mask, stage):
+        ''' NOTE(jiahang): 
+        * collect X, G_X = argmax(X), P(G^t-1 | G^t) and P(G_X | G^t)
+        ** P(G^t-1 | G^t) vs X
+        ** P(G_X | G^t) vs X
+        * target: to measure the performance of reverse process step by step and epoch by epoch
+        ** performance metrics: acc (G_X), auroc (G_X), prec (G_X), rec(G_X), cross_entropy (X)
+        '''
+        true_label, true_logits = get_true(dense_data.E)
+        noisy_data_T = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, timestamp=self.T)
+        E_T = noisy_data_T['E_t']
+        chain_E_Gt_1_Gt, chain_E_X_Gt = self.sample_chain_E(E_T, node_mask)
+
+        mask_E = (dense_data.E != 0.).any(dim=-1).cpu()
+        chain_E_Gt_1_Gt = chain_E_Gt_1_Gt[:, mask_E] # P(G^t-1 | G^t)
+        chain_E_X_Gt = chain_E_X_Gt[:, mask_E] # P(X | G^t)
+        self.lp_metric_dict[stage](true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
+
+    def compute_lp_metrics(self, stage):
+        chain_metrics_Gt_1_Gt, chain_metrics_X_Gt = self.lp_metric_dict[stage].compute()
+
+        if self.cfg.general.save_chain_results and self.current_epoch % self.cfg.general.save_chain_every_epochs == 0:
+            _dir = os.path.join(self.cfg.general.save_chain_results, self.name, stage)
+            if not os.path.exists(_dir):
+                os.makedirs(_dir)
+            with open(os.path.join(_dir, f"{self.current_epoch}_Gt_1_Gt.pkl"), 'wb') as f:
+                pickle.dump(chain_metrics_Gt_1_Gt, f)
+            with open(os.path.join(_dir, f"{self.current_epoch}_X_Gt.pkl"), 'wb') as f:
+                pickle.dump(chain_metrics_X_Gt, f)
 
     
