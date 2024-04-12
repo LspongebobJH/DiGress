@@ -7,20 +7,24 @@ general:
     wandb: 'online'
     resume: null            # If resume, path to ckpt file from outputs directory in main directory
     test_only: null
-    check_val_every_n_epochs: 100
-    sample_every_val: 4
-    samples_to_generate: 40
-    samples_to_save: 9
+    check_val_every_n_epochs: 10
+    sample_every_val: 10000 # disable validation sampling, no need
+    samples_to_generate: 5
+    samples_to_save: 5
     chains_to_save: 1
-    final_model_samples_to_generate: 10
-    final_model_samples_to_save: 10
-    final_model_chains_to_save: 10
+    final_model_samples_to_generate: 0 # disable final sampling
+    final_model_samples_to_save: 5
+    final_model_chains_to_save: 5
+    # NOTE(jiahang): new config
+    save_chain_results: /home/jiahang/DiGress/chain_results/${now:%Y-%m-%d}/${now:%H-%M-%S}-${general.name}
 train:
-    n_epochs: 50000
+    # n_epochs: 50000
+    n_epochs: 100
     batch_size: 5
     save_model: True
 model:
-    diffusion_steps: 1000
+    # diffusion_steps: 1000
+    diffusion_steps: 100
     n_layers: 8
     lambda_train: [5, 0]
     extra_features: null

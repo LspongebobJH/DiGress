@@ -31,8 +31,8 @@ class LPMetric(Metric):
 
     def compute(self):
         # NOTE(jiahang): at the end of each valid and test epoch. test has only one epoch.
-        label = torch.concat(self.true_labels, dim=0).cpu() # NOTE(jiahang): too sparse!!! learn all 0 edges, imbalanced problem
-        true_logits = torch.concat(self.true_logits, dim=0).cpu()
+        label = torch.concat(self.true_labels, dim=0) # NOTE(jiahang): too sparse!!! learn all 0 edges, imbalanced problem
+        true_logits = torch.concat(self.true_logits, dim=0)
         chain_E_Gt_1_Gt = torch.concat(self.chain_Es_Gt_1_Gt, dim=1)
         chain_E_X_Gt = torch.concat(self.chain_Es_X_Gt, dim=1)
 

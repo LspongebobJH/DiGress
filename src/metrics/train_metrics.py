@@ -61,10 +61,10 @@ class TrainLoss(nn.Module):
 
 class TrainLossDiscrete(nn.Module):
     """ Train with Cross entropy"""
-    def __init__(self, lambda_train):
+    def __init__(self, lambda_train, pos_e_w):
         super().__init__()
         self.node_loss = CrossEntropyMetric()
-        self.edge_loss = CrossEntropyMetric()
+        self.edge_loss = CrossEntropyMetric(pos_e_w)
         self.y_loss = CrossEntropyMetric()
         self.lambda_train = lambda_train
 
@@ -92,9 +92,9 @@ class TrainLossDiscrete(nn.Module):
         flat_true_E = true_E[mask_E, :]
         flat_pred_E = masked_pred_E[mask_E, :]
 
-        loss_X = self.node_loss(flat_pred_X, flat_true_X) if true_X.numel() > 0 else 0.0
-        loss_E = self.edge_loss(flat_pred_E, flat_true_E) if true_E.numel() > 0 else 0.0
-        loss_y = self.y_loss(pred_y, true_y) if true_y.numel() > 0 else 0.0
+        loss_X = self.node_loss(flat_pred_X, flat_true_X, loss_type = 'node') if true_X.numel() > 0 else 0.0
+        loss_E = self.edge_loss(flat_pred_E, flat_true_E, loss_type = 'edge') if true_E.numel() > 0 else 0.0
+        loss_y = self.y_loss(pred_y, true_y, loss_type = 'graph') if true_y.numel() > 0 else 0.0
 
         if log:
             to_log = {"train_loss/batch_CE": (loss_X + loss_E + loss_y).detach(),

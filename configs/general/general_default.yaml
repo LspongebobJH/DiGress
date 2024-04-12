@@ -25,7 +25,3 @@ final_model_chains_to_save: 20
 #final_model_chains_to_save: 1
 
 evaluate_all_checkpoints: False
-
-# NOTE(jiahang): new config
-save_chain_results: /home/jiahang/DiGress/chain_results/${now:%Y-%m-%d}/${now:%H-%M-%S}-${general.name}
-save_chain_every_epochs: 1

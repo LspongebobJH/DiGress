@@ -62,7 +62,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         self.dataset_info = dataset_infos
 
-        self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
+        self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train, self.cfg.model.pos_e_w)
 
         self.val_nll = NLL()
         self.val_X_kl = SumExceptBatchKL()
@@ -559,7 +559,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             
         chain_E_Gt_1_Gt = torch.flip(chain_E_Gt_1_Gt, [0])
         chain_E_X_Gt = torch.flip(chain_E_X_Gt, [0])
-        return chain_E_Gt_1_Gt, chain_E_X_Gt
+        return chain_E_Gt_1_Gt.cuda(), chain_E_X_Gt.cuda()
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -760,7 +760,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         E_T = noisy_data_T['E_t']
         chain_E_Gt_1_Gt, chain_E_X_Gt = self.sample_chain_E(E_T, node_mask)
 
-        mask_E = (dense_data.E != 0.).any(dim=-1).cpu()
+        mask_E = (dense_data.E != 0.).any(dim=-1)
         chain_E_Gt_1_Gt = chain_E_Gt_1_Gt[:, mask_E] # P(G^t-1 | G^t)
         chain_E_X_Gt = chain_E_X_Gt[:, mask_E] # P(X | G^t)
         self.lp_metric_dict[stage](true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
@@ -768,7 +768,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     def compute_lp_metrics(self, stage):
         chain_metrics_Gt_1_Gt, chain_metrics_X_Gt = self.lp_metric_dict[stage].compute()
 
-        if self.cfg.general.save_chain_results and self.current_epoch % self.cfg.general.save_chain_every_epochs == 0:
+        if self.cfg.general.save_chain_results:
             _dir = os.path.join(self.cfg.general.save_chain_results, self.name, stage)
             if not os.path.exists(_dir):
                 os.makedirs(_dir)

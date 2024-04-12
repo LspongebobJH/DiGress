@@ -87,17 +87,27 @@ class SumExceptBatchKL(Metric):
 
 
 class CrossEntropyMetric(Metric):
-    def __init__(self):
+    def __init__(self, pos_e_w = 1.0):
         super().__init__()
+        # NOTE(jiahang): weight of positive edge samples, only avaiable to edge loss
+        ## the actual weight of positive edges = self.pos_w * lambda
+        ## 
+        self.pos_e_w = pos_e_w # no special weight
         self.add_state('total_ce', default=torch.tensor(0.), dist_reduce_fx="sum")
         self.add_state('total_samples', default=torch.tensor(0.), dist_reduce_fx="sum")
 
-    def update(self, preds: Tensor, target: Tensor) -> None:
+    def update(self, preds: Tensor, target: Tensor, loss_type: str = 'node') -> None:
         """ Update state with predictions and targets.
             preds: Predictions from model   (bs * n, d) or (bs * n * n, d)
             target: Ground truth values     (bs * n, d) or (bs * n * n, d). """
         target = torch.argmax(target, dim=-1)
-        output = F.cross_entropy(preds, target, reduction='sum')
+        if loss_type in ['node', 'graph']:
+            output = F.cross_entropy(preds, target, reduction='sum')
+        elif loss_type == 'edge':
+            weight = torch.tensor([1.0, self.pos_e_w]).to(self.device)
+            output = F.cross_entropy(preds, target, weight=weight, reduction='sum')
+        else:
+            raise Exception(f"loss_type {loss_type} not exist")
         self.total_ce += output
         self.total_samples += preds.size(0)
 

@@ -5,10 +5,9 @@ model: 'graph_tf'
 diffusion_steps: 500
 diffusion_noise_schedule: 'cosine'              # 'cosine', 'polynomial_2'
 n_layers: 5
+pos_e_w: 1.0 # the loss weight of positive edge samples. 1.0 means no effect. 
 
-
-# extra_features: 'all'        # 'all', 'cycles', 'eigenvalues' or null
-extra_features: null       # 'all', 'cycles', 'eigenvalues' or null
+extra_features: 'all'        # 'all', 'cycles', 'eigenvalues' or null
 
 # Do not set hidden_mlp_E, dim_ffE too high, computing large tensors on the edges is costly
 # At the moment (03/08), y contains quite little information
