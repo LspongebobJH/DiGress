@@ -115,8 +115,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
             
         # NOTE(jiahang): to compute metrics relevant to link prediction
-        self.lp_metric_valid = LPMetric(stage='val')
-        self.lp_metric_test = LPMetric(stage='test')
+        self.lp_metric_valid = LPMetric(stage='val', 
+                                        num_steps = self.T // self.cfg.general.save_chain_every_steps, 
+                                        pos_e_w = self.cfg.model.pos_e_w)
+        self.lp_metric_test = LPMetric(stage='test', 
+                                       num_steps = self.T // self.cfg.general.save_chain_every_steps, 
+                                       pos_e_w = self.cfg.model.pos_e_w)
         self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test}
 
         self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
@@ -531,6 +535,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     @torch.no_grad()
     def sample_chain_E(self, E, node_mask):
         """ NOTE(jiahang) adapted from sample_batch
+        Note that, the returned chain is a reversed chain, that is, [t, t-1, t-2, ..., 0]
         """
         batch_size = E.shape[0]
         # Sample noise  -- z has size (n_samples, n_nodes, n_features)
@@ -540,12 +545,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         assert (E == torch.transpose(E, 1, 2)).all()
 
-        chain_E_size = torch.Size((self.T, batch_size, E.size(1), E.size(2)))
+        chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
         chain_E_Gt_1_Gt = torch.zeros(chain_E_size)
         chain_E_X_Gt = torch.zeros(chain_E_size)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        for s_int in reversed(range(0, self.T)):
+        for s_int in reversed(range(0, self.T, self.cfg.general.save_chain_every_steps)):
             s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
             t_array = s_array + 1
             s_norm = s_array / self.T
@@ -553,8 +558,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
             # Sample z_s
             sampled_s, _, P_Gt_1_Gt, P_X_Gt= self.sample_p_zs_given_zt(s_norm, t_norm, X, E, y, node_mask)
-            chain_E_Gt_1_Gt[s_int] = P_Gt_1_Gt[..., -1]
-            chain_E_X_Gt[s_int] = P_X_Gt[..., -1]
+            chain_E_Gt_1_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gt_1_Gt[..., -1]
+            chain_E_X_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_X_Gt[..., -1]
             X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
             
         chain_E_Gt_1_Gt = torch.flip(chain_E_Gt_1_Gt, [0])
@@ -763,18 +768,24 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         mask_E = (dense_data.E != 0.).any(dim=-1)
         chain_E_Gt_1_Gt = chain_E_Gt_1_Gt[:, mask_E] # P(G^t-1 | G^t)
         chain_E_X_Gt = chain_E_X_Gt[:, mask_E] # P(X | G^t)
-        self.lp_metric_dict[stage](true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
+        self.lp_metric_dict[stage].update(true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
 
     def compute_lp_metrics(self, stage):
-        chain_metrics_Gt_1_Gt, chain_metrics_X_Gt = self.lp_metric_dict[stage].compute()
+        chain_metrics = self.lp_metric_dict[stage].compute()
+
+        # NOTE(jiahang) it seems that validation_step runs 2 batches, making the length
+        ## of metric other than "ce" have save_chain_steps ( T // save_chain_every_steps ) * 2
+        ## we only take the first save_chain_steps. Note that ce takes the average of 2 batches.
+        ## so [acc, prec, rec] and ce are not completely aligned.
+        for key, val in chain_metrics.items():
+            for metric_name, metric in val.items():
+                chain_metrics[key][metric_name] = metric[:self.T // self.cfg.general.save_chain_every_steps]
 
         if self.cfg.general.save_chain_results:
             _dir = os.path.join(self.cfg.general.save_chain_results, self.name, stage)
             if not os.path.exists(_dir):
                 os.makedirs(_dir)
-            with open(os.path.join(_dir, f"{self.current_epoch}_Gt_1_Gt.pkl"), 'wb') as f:
-                pickle.dump(chain_metrics_Gt_1_Gt, f)
-            with open(os.path.join(_dir, f"{self.current_epoch}_X_Gt.pkl"), 'wb') as f:
-                pickle.dump(chain_metrics_X_Gt, f)
+            with open(os.path.join(_dir, f"{self.current_epoch}.pkl"), 'wb') as f:
+                pickle.dump(chain_metrics, f)
 
     

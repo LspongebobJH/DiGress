@@ -17,6 +17,7 @@ general:
     final_model_chains_to_save: 5
     # NOTE(jiahang): new config
     save_chain_results: /home/jiahang/DiGress/chain_results/${now:%Y-%m-%d}/${now:%H-%M-%S}-${general.name}
+    save_chain_every_steps: 5 # no need to save all steps
 train:
     # n_epochs: 50000
     n_epochs: 100

@@ -209,7 +209,7 @@ def main(cfg: DictConfig):
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='val/epoch_NLL',
-                                              save_top_k=5,
+                                              save_top_k=2,
                                               mode='min',
                                               every_n_epochs=1)
         last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
@@ -234,7 +234,6 @@ def main(cfg: DictConfig):
                       fast_dev_run=cfg.general.name == 'debug',
                       enable_progress_bar=False,
                       callbacks=callbacks,
-                      log_every_n_steps=50 if name != 'debug' else 1,
                       logger = [])
 
     if not cfg.general.test_only:

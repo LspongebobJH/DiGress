@@ -100,8 +100,16 @@ class CrossEntropyMetric(Metric):
         """ Update state with predictions and targets.
             preds: Predictions from model   (bs * n, d) or (bs * n * n, d)
             target: Ground truth values     (bs * n, d) or (bs * n * n, d). """
-        target = torch.argmax(target, dim=-1)
+
+        ''' NOTE(jiahang):
+        Here the torch.argmax(target, dim=-1) only applied to node and graph, rather than edge
+        since input graph has edge presence logits rather than labels.
+        we want to minimizes with respect to logits.
+        see the last commit for detailed comparison. 
+        (12b6fa9f7e42d82d93c3cfe316026471b63fe919: protein-debug-1)
+        '''
         if loss_type in ['node', 'graph']:
+            target = torch.argmax(target, dim=-1)
             output = F.cross_entropy(preds, target, reduction='sum')
         elif loss_type == 'edge':
             weight = torch.tensor([1.0, self.pos_e_w]).to(self.device)

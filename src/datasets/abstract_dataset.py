@@ -9,7 +9,7 @@ from torch_geometric.data.lightning import LightningDataset
 class AbstractDataModule(LightningDataset):
     def __init__(self, cfg, datasets):
         super().__init__(train_dataset=datasets['train'], val_dataset=datasets['val'], test_dataset=datasets['test'],
-                         batch_size=cfg.train.batch_size if 'debug' not in cfg.general.name else 2,
+                         batch_size=cfg.train.batch_size if cfg.general.name != 'debug' else 2,
                          num_workers=cfg.train.num_workers,
                          pin_memory=getattr(cfg.dataset, "pin_memory", False))
         self.cfg = cfg
