@@ -209,9 +209,11 @@ def main(cfg: DictConfig):
     if cfg.train.save_model:
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
-                                              monitor='val/epoch_NLL',
+                                            #   monitor='val/epoch_NLL',
+                                              monitor='val/auroc_X_G1',
                                               save_top_k=2,
-                                              mode='min',
+                                            #   mode='min',
+                                              mode='max',
                                               every_n_epochs=1)
         last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
         callbacks.append(last_ckpt_save)
