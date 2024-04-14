@@ -3,7 +3,7 @@
 # adapted from sbm.yaml
 general:
     name : 'protein'
-    gpus : 1
+    gpus : [0]
     wandb: 'online'
     resume: null            # If resume, path to ckpt file from outputs directory in main directory
     test_only: null
