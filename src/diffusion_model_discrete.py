@@ -201,14 +201,18 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     def on_validation_epoch_end(self) -> None:
         metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
                    self.val_X_logp.compute(), self.val_E_logp.compute()]
+
+        auroc_G0_1_G1, auroc_X_G1 = self.compute_lp_metrics('valid')
+
         if wandb.run:
             wandb.log({"val/epoch_NLL": metrics[0],
                        "val/X_kl": metrics[1],
                        "val/E_kl": metrics[2],
                        "val/X_logp": metrics[3],
-                       "val/E_logp": metrics[4]}, commit=False)
+                       "val/E_logp": metrics[4],
+                       "val/auroc_G0_1_G1": auroc_G0_1_G1,
+                       "val/auroc_X_G1": auroc_X_G1}, commit=False)
 
-        self.compute_lp_metrics('valid')
 
         self.print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
                    f"Val Edge type KL: {metrics[2] :.2f}")
@@ -278,14 +282,19 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         """ Measure likelihood on a test set and compute stability metrics. """
         metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
                    self.test_X_logp.compute(), self.test_E_logp.compute()]
+
+        auroc_G0_1_G1, auroc_X_G1 = self.compute_lp_metrics('test')
+
         if wandb.run:
             wandb.log({"test/epoch_NLL": metrics[0],
                        "test/X_kl": metrics[1],
                        "test/E_kl": metrics[2],
                        "test/X_logp": metrics[3],
-                       "test/E_logp": metrics[4]}, commit=False)
+                       "test/E_logp": metrics[4],
+                       "test/auroc_G0_1_G1": auroc_G0_1_G1,
+                       "test/auroc_X_G1": auroc_X_G1}, commit=False)
             
-        self.compute_lp_metrics('test')
+        
 
         self.print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
                    f"Test Edge type KL: {metrics[2] :.2f}")
@@ -787,5 +796,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 os.makedirs(_dir)
             with open(os.path.join(_dir, f"{self.current_epoch}.pkl"), 'wb') as f:
                 pickle.dump(chain_metrics, f)
+
+        auroc_G0_1_G1, auroc_X_G1 = self.lp_metric_dict[stage].compute_auroc()
+        return auroc_G0_1_G1, auroc_X_G1
 
     

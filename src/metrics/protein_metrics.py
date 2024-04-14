@@ -13,11 +13,12 @@ class LPMetric:
         super().__init__()
         self.stage = stage
 
-        # hard to implement
-        # self.auroc = {
-        #     'Gt_1_Gt': AUROC('binary', multidim_average='samplewise'),
-        #     'X_Gt': AUROC('binary', multidim_average='samplewise')
-        # }
+        # the auroc only computes on the P(G0|G1) and P(X|G1).
+        ## basically G0 == X. We check both for sanity check.
+        self.auroc = {
+            'Gt_1_Gt': AUROC('binary'),
+            'X_Gt': AUROC('binary')
+        }
         self.acc = {
             'Gt_1_Gt': Accuracy('binary', multidim_average='samplewise'),
             'X_Gt': Accuracy('binary', multidim_average='samplewise')
@@ -40,8 +41,8 @@ class LPMetric:
         num_steps = chain_E_Gt_1_Gt.shape[0]
         true_labels, true_logits = true_labels.expand(num_steps, -1), true_logits.expand(num_steps, -1)
 
-        # self.auroc['Gt_1_Gt'].update(chain_E_Gt_1_Gt, true_labels)
-        # self.auroc['X_Gt'].update(chain_E_X_Gt, true_labels)
+        self.auroc['Gt_1_Gt'].update(chain_E_Gt_1_Gt[-1, :], true_labels[-1, :])
+        self.auroc['X_Gt'].update(chain_E_X_Gt[-1, :], true_labels[-1, :])
 
         self.acc['Gt_1_Gt'].update(chain_E_Gt_1_Gt, true_labels)
         self.acc['X_Gt'].update(chain_E_X_Gt, true_labels)
@@ -78,8 +79,11 @@ class LPMetric:
 
         return chain_metrics
 
+    def compute_auroc(self):
+        return self.auroc['Gt_1_Gt'].compute().item(), self.auroc['X_Gt'].compute().item()
+
     def reset(self):
-        for metric in [self.acc, self.prec, self.rec, self.ce]:
+        for metric in [self.auroc, self.acc, self.prec, self.rec, self.ce]:
             for item in metric.values():
                 item.reset()
 

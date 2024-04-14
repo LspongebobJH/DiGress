@@ -7,6 +7,7 @@ import torch
 torch.cuda.empty_cache()
 import hydra
 from omegaconf import DictConfig
+from omegaconf.listconfig import ListConfig
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
@@ -224,7 +225,8 @@ def main(cfg: DictConfig):
     if name == 'debug':
         print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
 
-    use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
+    use_gpu = (len(cfg.general.gpus) > 0 if isinstance(cfg.general.gpus, ListConfig) else cfg.general.gpus > 0) \
+            and torch.cuda.is_available()
     trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
                     #   strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
                       accelerator='gpu' if use_gpu else 'cpu',
