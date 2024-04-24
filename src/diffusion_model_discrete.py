@@ -522,7 +522,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # When evaluating, the loss for t=0 is computed separately
         lowest_t = 0 if self.training else 1
         if not timestamp:
-            t_int = torch.randint(lowest_t, self.T + 1, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
+            t_int = torch.randint(lowest_t, self.T, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
+            # NOTE(jiahang): I make self.T + 1 to self.T to simplify engineering work
         else:
             t_int = torch.full(size=(X.size(0), 1), fill_value=timestamp, device=X.device).float()
         s_int = t_int - 1
@@ -573,7 +574,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
 
 
-        noisy_data = {'t_int': t_int, 
+        noisy_data = {'t': t_int, 
                       'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
                       'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
                       'node_mask': node_mask}

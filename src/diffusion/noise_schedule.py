@@ -241,12 +241,15 @@ class NDTransition:
         # TODO(jiahang): could be slow when the graph is large. improve: list loop --> pad + matrix multiplication on cuda
         E_list = []
         if sample_forward:
+            # raise Exception("cannot run now since E shape has not been aligned")
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
-                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().cpu()
-                new_E = torch.zeros((len(node_mask[0]), len(node_mask[0]))).double()
-                new_E[e_mask] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten() # set edge presence prob to f(sigma t)
-                new_E[_E[..., -1].bool()] = 1. # set such prob of existing edges to 1
-                new_E[torch.eye(new_E.shape[0]).bool()] = 0. # remove self loop
+                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten().cpu()
+                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0])), 2).double()
+                new_E[e_mask, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten() # set edge presence prob to f(sigma t)
+                new_E[_E[..., -1].bool().flatten(), 1] = 1. # set such prob of existing edges to 1
+                new_E[..., 0] = 1. - new_E[..., 1]
+                new_E[torch.eye(len(node_mask[0])).bool().flatten()] = 0. # remove self loop
+                new_E = new_E.reshape(len(node_mask[0]), len(node_mask[0]), 2)
                 assert (new_E - torch.transpose(new_E, 0, 1)).abs().mean() < 1e-6, "not a symmetric graph!" # check symmetricity for sanity check
                 E_list.append(new_E)
         else:
@@ -261,12 +264,12 @@ class NDTransition:
                 Qt[e_mask, 0, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten()
                 Qt[e_mask, 0, 0] = 1. - Qt[e_mask, 0, 1]
                 new_E = new_E @ Qt
-                new_E = new_E.squeeze(1)[:, 1].reshape(len(node_mask[0]), len(node_mask[0]))
-                new_E[torch.eye(new_E.shape[0]).bool()] = 0. # remove self loop
+                new_E = new_E.squeeze(1).reshape(len(node_mask[0]), len(node_mask[0]), 2)
+                new_E[torch.eye(len(node_mask[0])).bool()] = 0. # remove self loop
                 assert (new_E - torch.transpose(new_E, 0, 1)).abs().mean() < 1e-6, "not a symmetric graph!" # check symmetricity for sanity check
                 E_list.append(new_E)
         new_E = torch.stack(E_list)
-        return utils.PlaceHolder(x=self.u_x, E=new_E, y=self.u_y)
+        return new_E
 
     def get_Qt(self, beta_t, device):
         raise NotImplementedError
