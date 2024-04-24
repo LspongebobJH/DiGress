@@ -2,3 +2,7 @@ name: protein
 remove_h: null
 network_dir: 'data/ND-code-datasets/Application2-protein-contact-maps/full-predictions'
 force_reload: False
+norm: ND_norm
+
+eps: 1e-3 # only used in eigen norm and ND norm
+diffusion_steps: ${model.diffusion_steps} # only used in ND norm

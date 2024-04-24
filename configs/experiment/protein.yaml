@@ -24,6 +24,8 @@ train:
     batch_size: 5
     save_model: True
 model:
+    transition: ND
+    sample_forward: true
     # diffusion_steps: 1000
     diffusion_steps: 100
     n_layers: 8

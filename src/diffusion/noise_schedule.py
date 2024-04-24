@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.nn.functional import sigmoid
 from src import utils
 from src.diffusion import diffusion_utils
 
@@ -221,3 +222,54 @@ class AbsorbingStateTransition:
         q_y = alpha_bar_t * torch.eye(self.y_classes).unsqueeze(0) + (1 - alpha_bar_t) * self.u_y
 
         return q_x, q_e, q_y
+
+class NDTransition:
+    # NOTE(jiahang): anything relevant to x and y are useless, won't affect loss and metrics
+    def __init__(self, x_marginals, y_classes, T):
+        self.X_classes = len(x_marginals)
+        self.y_classes = y_classes
+        self.x_marginals = x_marginals
+
+        self.u_x = x_marginals.unsqueeze(0).expand(self.X_classes, -1).unsqueeze(0)
+        self.u_y = torch.ones(1, self.y_classes, self.y_classes)
+        if self.y_classes > 0:
+            self.u_y = self.u_y / self.y_classes
+
+        self.T = T
+
+    def get_graph_prob(self, E, eigval_pow_cumsum, eigvec, node_mask, sample_forward=True):
+        # TODO(jiahang): could be slow when the graph is large. improve: list loop --> pad + matrix multiplication on cuda
+        E_list = []
+        if sample_forward:
+            for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
+                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().cpu()
+                new_E = torch.zeros((len(node_mask[0]), len(node_mask[0]))).double()
+                new_E[e_mask] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten() # set edge presence prob to f(sigma t)
+                new_E[_E[..., -1].bool()] = 1. # set such prob of existing edges to 1
+                new_E[torch.eye(new_E.shape[0]).bool()] = 0. # remove self loop
+                assert (new_E - torch.transpose(new_E, 0, 1)).abs().mean() < 1e-6, "not a symmetric graph!" # check symmetricity for sanity check
+                E_list.append(new_E)
+        else:
+            for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
+                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten().cpu()
+                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 1, 2)).double()
+                new_E[e_mask, 0, 1] = _E
+                new_E[e_mask, 0, 0] = 1 - _E
+                Qt = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 2, 2)).double()
+                Qt[e_mask, 1, 0] = 0.
+                Qt[e_mask, 1, 1] = 1.
+                Qt[e_mask, 0, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten()
+                Qt[e_mask, 0, 0] = 1. - Qt[e_mask, 0, 1]
+                new_E = new_E @ Qt
+                new_E = new_E.squeeze(1)[:, 1].reshape(len(node_mask[0]), len(node_mask[0]))
+                new_E[torch.eye(new_E.shape[0]).bool()] = 0. # remove self loop
+                assert (new_E - torch.transpose(new_E, 0, 1)).abs().mean() < 1e-6, "not a symmetric graph!" # check symmetricity for sanity check
+                E_list.append(new_E)
+        new_E = torch.stack(E_list)
+        return utils.PlaceHolder(x=self.u_x, E=new_E, y=self.u_y)
+
+    def get_Qt(self, beta_t, device):
+        raise NotImplementedError
+    
+    def get_Qt_bar(self, alpha_bar_t, device):
+        raise NotImplementedError

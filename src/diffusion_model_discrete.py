@@ -9,7 +9,7 @@ import pickle
 
 from models.transformer_model import GraphTransformer
 from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
-    MarginalUniformTransition
+    MarginalUniformTransition, NDTransition
 from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
@@ -94,6 +94,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.noise_schedule = PredefinedNoiseScheduleDiscrete(cfg.model.diffusion_noise_schedule,
                                                               timesteps=cfg.model.diffusion_steps)
 
+        self.transition_model_name = cfg.model.transition
+
         if cfg.model.transition == 'uniform':
             self.transition_model = DiscreteUniformTransition(x_classes=self.Xdim_output, e_classes=self.Edim_output,
                                                               y_classes=self.ydim_output)
@@ -111,6 +113,16 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             print(f"Marginal distribution of the classes: {x_marginals} for nodes, {e_marginals} for edges")
             self.transition_model = MarginalUniformTransition(x_marginals=x_marginals, e_marginals=e_marginals,
                                                               y_classes=self.ydim_output)
+            self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
+                                                y=torch.ones(self.ydim_output) / self.ydim_output)
+            
+        elif cfg.model.transition == 'ND':
+            node_types = self.dataset_info.node_types.float()
+            x_marginals = node_types / torch.sum(node_types)
+            edge_types = self.dataset_info.edge_types.float()
+            e_marginals = edge_types / torch.sum(edge_types)
+
+            self.transition_model = NDTransition(x_marginals, y_classes=self.ydim_output, T=self.T)
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
             
@@ -189,7 +201,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     def validation_step(self, data, i):
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
         dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
+        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, data.batch.unique(), 'valid')
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
         nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
@@ -455,7 +467,15 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         return utils.PlaceHolder(X=probX0, E=probE0, y=proby0)
 
-    def apply_noise(self, X, E, y, node_mask, timestamp = None):
+    def apply_noise(self, *args):
+        if self.transition_model_name in ['uniform', 'marginal']:
+            return self.apply_noise_original(*args)
+        elif self.transition_model_name == 'ND':
+            return self.apply_noise_ND(*args)
+        else:
+            raise Exception(f"no transition model name {self.transition_model_name}")
+
+    def apply_noise_original(self, X, E, y, node_mask, elem_idx = None, stage = None, timestamp = None):
         """ Sample noise and apply it to the data. """
 
         # Sample a timestep t.
@@ -493,6 +513,70 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         noisy_data = {'t_int': t_int, 't': t_float, 'beta_t': beta_t, 'alpha_s_bar': alpha_s_bar,
                       'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
+        return noisy_data
+
+    def apply_noise_ND(self, X, E, y, node_mask, elem_idx, stage, timestamp = None):
+        """ Sample noise and apply it to the data. Adapted from apply_noise """
+
+        # Sample a timestep t.
+        # When evaluating, the loss for t=0 is computed separately
+        lowest_t = 0 if self.training else 1
+        if not timestamp:
+            t_int = torch.randint(lowest_t, self.T + 1, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
+        else:
+            t_int = torch.full(size=(X.size(0), 1), fill_value=timestamp, device=X.device).float()
+        s_int = t_int - 1
+
+        if stage == 'train':
+            dataset = self.trainer.datamodule.train_dataset
+        elif stage == 'val':
+            dataset = self.trainer.datamodule.val_dataset
+        else:
+            dataset = self.trainer.datamodule.test_dataset
+
+        eigval_pow_cumsum, eigvec, edge_prob = dataset.get_info(elem_idx)
+        eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t_int)]
+        eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s_int)]
+
+        if not self.cfg.model.sample_forward:
+            E = edge_prob
+
+        probE_t = self.transition_model.get_graph_prob(
+            E,
+            eigval_pow_cumsum_t,
+            eigvec,
+            node_mask,
+            self.cfg.model.sample_forward
+        )
+
+        probE_s = self.transition_model.get_graph_prob(
+            E,
+            eigval_pow_cumsum_s,
+            eigvec,
+            node_mask,
+            self.cfg.model.sample_forward
+        )
+
+        if self.cfg.model.sample_forward:
+            sampled_t = diffusion_utils.sample_discrete_features(probX=X, probE=probE_t, node_mask=node_mask)
+            sampled_s = diffusion_utils.sample_discrete_features(probX=X, probE=probE_s, node_mask=node_mask)
+
+            E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
+
+            E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output)
+            assert (E.shape == E_t.shape == E_s.shape)
+
+            z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+        else:
+            z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
+
+
+        noisy_data = {'t_int': t_int, 
+                      'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
+                      'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
+                      'node_mask': node_mask}
         return noisy_data
 
     def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
