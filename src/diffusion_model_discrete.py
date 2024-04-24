@@ -16,28 +16,6 @@ from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from metrics.protein_metrics import LPMetric
 from src import utils
 
-def get_true(true_E):
-    """ adapted from TrainLossDiscrete.forward()
-    
-    true_E : tensor -- (bs, n, n, de)
-    """
-
-    from torch.nn.functional import softmax
-
-    true_E = torch.reshape(true_E, (-1, true_E.size(-1)))  # (bs * n * n, de)
-
-    # Remove masked rows
-    mask_E = (true_E != 0.).any(dim=-1)
-    flat_true_E = true_E[mask_E, :]
-
-    argmax_flat_true_E = flat_true_E.argmax(dim=1) # NOTE(jiahang): take 0.5 as threshold, just for testing
-
-    true_E_label = argmax_flat_true_E
-    true_E_logits = flat_true_E[:, 1]
-
-    return true_E_label, true_E_logits
-
-
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
                  domain_features):
