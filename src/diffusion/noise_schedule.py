@@ -237,14 +237,13 @@ class NDTransition:
 
         self.T = T
 
-    def get_graph_prob(self, E, eigval_pow_cumsum, eigvec, node_mask, sample_forward=True):
+    def forward_diffusion(self, E, eigval_pow_cumsum, eigvec, node_mask, sample_forward=True):
         # TODO(jiahang): could be slow when the graph is large. improve: list loop --> pad + matrix multiplication on cuda
         E_list = []
         if sample_forward:
-            # raise Exception("cannot run now since E shape has not been aligned")
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
-                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten().cpu()
-                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0])), 2).double()
+                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten()
+                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0])), 2).double().cuda()
                 new_E[e_mask, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten() # set edge presence prob to f(sigma t)
                 new_E[_E[..., -1].bool().flatten(), 1] = 1. # set such prob of existing edges to 1
                 new_E[..., 0] = 1. - new_E[..., 1]
@@ -254,11 +253,11 @@ class NDTransition:
                 E_list.append(new_E)
         else:
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
-                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten().cpu()
-                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 1, 2)).double()
+                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten()
+                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 1, 2)).double().cuda()
                 new_E[e_mask, 0, 1] = _E
                 new_E[e_mask, 0, 0] = 1 - _E
-                Qt = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 2, 2)).double()
+                Qt = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 2, 2)).double().cuda()
                 Qt[e_mask, 1, 0] = 0.
                 Qt[e_mask, 1, 1] = 1.
                 Qt[e_mask, 0, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten()

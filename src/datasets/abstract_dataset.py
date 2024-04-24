@@ -1,12 +1,59 @@
+from torch_geometric.data import Dataset
 from src.diffusion.distributions import DistributionNodes
 import src.utils as utils
 import torch
 import pytorch_lightning as pl
-from torch_geometric.loader import DataLoader
+from torch.utils.data import DataLoader
 from torch_geometric.data.lightning import LightningDataset
+from typing import List, Optional, Sequence, Union
+from torch_geometric.data.data import BaseData
+from torch_geometric.data.datapipes import DatasetAdapter
+from torch_geometric.loader.dataloader import Collater
+
+class NewDataLoader(DataLoader):
+    def __init__(
+        self,
+        dataset: Union[Dataset, Sequence[BaseData], DatasetAdapter],
+        batch_size: int = 1,
+        shuffle: bool = False,
+        follow_batch: Optional[List[str]] = None,
+        exclude_keys: Optional[List[str]] = None,
+        **kwargs,
+    ):
+        # Save for PyTorch Lightning < 1.6:
+        self.follow_batch = follow_batch
+        self.exclude_keys = exclude_keys
+        self.pyg_collator = Collater(follow_batch, exclude_keys)
+
+        super().__init__(
+            dataset,
+            batch_size,
+            shuffle,
+            collate_fn=self.collate_fn,
+            **kwargs,
+        )
+
+    def collate_fn(self, data: list):
+        res = {k: [] for k in data[0].keys()}
+        for d in data:
+            [res[k].append(v) for k, v in d.items()]
+        for k, v in res.items():
+            if k != 'g':
+                continue
+            res[k] = self.pyg_collator(v)
+        return res
 
 
-class AbstractDataModule(LightningDataset):
+
+class NewLightningDataset(LightningDataset):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def dataloader(self, dataset: Dataset, **kwargs) -> DataLoader:
+        return NewDataLoader(dataset, **kwargs)
+        
+
+class AbstractDataModule(NewLightningDataset):
     def __init__(self, cfg, datasets):
         super().__init__(train_dataset=datasets['train'], val_dataset=datasets['val'], test_dataset=datasets['test'],
                          batch_size=cfg.train.batch_size if cfg.general.name != 'debug' else 2,
@@ -23,6 +70,7 @@ class AbstractDataModule(LightningDataset):
         all_counts = torch.zeros(max_nodes_possible)
         for loader in [self.train_dataloader(), self.val_dataloader()]:
             for data in loader:
+                data = data['g']
                 unique, counts = torch.unique(data.batch, return_counts=True)
                 for count in counts:
                     all_counts[count] += 1
@@ -101,6 +149,7 @@ class AbstractDatasetInfos:
 
     def compute_input_output_dims(self, datamodule, extra_features, domain_features):
         example_batch = next(iter(datamodule.train_dataloader()))
+        example_batch = example_batch['g']
         ex_dense, node_mask = utils.to_dense(example_batch.x, example_batch.edge_index, example_batch.edge_attr,
                                              example_batch.batch)
         example_data = {'X_t': ex_dense.X, 'E_t': ex_dense.E, 'y_t': example_batch['y'], 'node_mask': node_mask}

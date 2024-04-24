@@ -133,7 +133,7 @@ class ProteinDataset(InMemoryDataset):
                                                 y=y, n_nodes=num_nodes)
 
             data_list.append(data)
-            edge_prob_list.append(edge_prob)
+            edge_prob_list.append(adj.flatten())
 
         torch.save(self.collate(data_list), self.processed_paths[0])
         torch.save(edge_prob_list, self.processed_paths[1])
@@ -163,12 +163,26 @@ class ProteinDataset(InMemoryDataset):
         return eigval_pow_cumsum, eigvec, data
 
     def get_info(self, idx):
-        eigval_pow_cumsum = itemgetter(*idx)(self.eigval_pow_cumsum)
-        eigvec = itemgetter(*idx)(self.eigvec)
-        edge_prob = itemgetter(*idx)(self.edge_prob)
+        if isinstance(idx, list):
+            eigval_pow_cumsum = itemgetter(*idx)(self.eigval_pow_cumsum)
+            eigvec = itemgetter(*idx)(self.eigvec)
+            edge_prob = itemgetter(*idx)(self.edge_prob)
+        else:
+            eigval_pow_cumsum = self.eigval_pow_cumsum[idx]
+            eigvec = self.eigvec[idx]
+            edge_prob = self.edge_prob[idx]
 
         return eigval_pow_cumsum, eigvec, edge_prob
 
+    def __getitem__(self, idx):
+        eigval_pow_cumsum, eigvec, edge_prob = self.get_info(idx)
+        res = {
+            'g': self.get(idx),
+            'eigval_pow_cumsum': eigval_pow_cumsum,
+            'eigvec': eigvec,
+            'edge_prob': edge_prob
+        }
+        return res
     
 class ProteinDataModule(AbstractDataModule):
     # TODO(jiahang): getitem in this class and its parent class is of no use?

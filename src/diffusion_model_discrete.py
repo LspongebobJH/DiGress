@@ -144,21 +144,32 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.best_val_nll = 1e8
         self.val_counter = 0
 
-    def training_step(self, data, i):
-        if data.edge_index.numel() == 0:
+    def training_step(self, batch, i):
+        g = batch['g']
+        if g.edge_index.numel() == 0:
             self.print("Found a batch with no edges. Skipping.")
             return
-        dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
         dense_data = dense_data.mask(node_mask)
         X, E = dense_data.X, dense_data.E
-        noisy_data = self.apply_noise(X, E, data.y, node_mask)
+        noisy_data = self.apply_noise_ND(dense_data.X, dense_data.E, g.y, node_mask, batch, 'train')
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
-        loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
-                               true_X=X, true_E=E, true_y=data.y,
-                               log=i % self.log_every_steps == 0)
+        # predict G0
+        # loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+        #                        true_X=X, true_E=E, true_y=g.y,
+        #                        log=i % self.log_every_steps == 0)
 
-        self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=E,
+        # predict Gs (Gt-1)
+        loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+                               true_X=X, true_E=noisy_data['E_s'], true_y=g.y,
+                               log=i % self.log_every_steps == 0)
+        # metrics on G0
+        # self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=E,
+        #                    log=i % self.log_every_steps == 0)
+
+        # metrics on Gs (Gt-1)
+        self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=noisy_data['E_s'],
                            log=i % self.log_every_steps == 0)
 
         return {'loss': loss}
@@ -198,17 +209,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.sampling_metrics.reset()
         self.lp_metric_valid.reset()
 
-    def validation_step(self, data, i):
-        dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+    def validation_step(self, batch, i):
+        g = batch['g']
+        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
         dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, data.batch.unique(), 'valid')
-        extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
-        nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
+        # NOTE(jiahang): neglect computing ELBO to simplify engineering effort
+        # noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, data.batch.unique(), 'valid')
+        # extra_data = self.compute_extra_data(noisy_data)
+        # pred = self.forward(noisy_data, extra_data, node_mask)
+        # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
 
-        self.update_lp_metrics(dense_data, data, node_mask, 'valid')
+        self.update_lp_metrics(dense_data, batch, node_mask, 'valid')
         
-        return {'loss': nll}
+        # return {'loss': nll}
+        return {'loss': 0.0}
 
     def on_validation_epoch_end(self) -> None:
         metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
@@ -279,17 +293,20 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if self.local_rank == 0:
             utils.setup_wandb(self.cfg)
 
-    def test_step(self, data, i):
-        dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+    def test_step(self, batch, i):
+        g = batch['g']
+        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
         dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
-        extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
-        nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
+        # NOTE(jiahang): neglect computing ELBO to simplify engineering effort
+        # noisy_data = self.apply_noise(dense_data.X, dense_data.E, g.y, node_mask)
+        # extra_data = self.compute_extra_data(noisy_data)
+        # pred = self.forward(noisy_data, extra_data, node_mask)
+        # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, g.y, node_mask, test=True)
 
-        self.update_lp_metrics(dense_data, data, node_mask, 'test')
+        self.update_lp_metrics(dense_data, batch, node_mask, 'test')
         
-        return {'loss': nll}
+        # return {'loss': nll}
+        return {'loss': 0.0}
 
     def on_test_epoch_end(self) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
@@ -361,7 +378,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.print("Generated graphs Saved. Computing sampling metrics...")
         self.sampling_metrics(samples, self.name, self.current_epoch, self.val_counter, test=True, local_rank=self.local_rank)
         self.print("Done testing.")
-
 
     def kl_prior(self, X, E, node_mask):
         """Computes the KL between q(z1 | x) and the prior p(z1) = Normal(0, 1).
@@ -467,11 +483,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         return utils.PlaceHolder(X=probX0, E=probE0, y=proby0)
 
-    def apply_noise(self, *args):
+    def apply_noise(self, *args, **kwargs):
         if self.transition_model_name in ['uniform', 'marginal']:
-            return self.apply_noise_original(*args)
+            return self.apply_noise_original(*args, **kwargs)
         elif self.transition_model_name == 'ND':
-            return self.apply_noise_ND(*args)
+            return self.apply_noise_ND(*args, **kwargs)
         else:
             raise Exception(f"no transition model name {self.transition_model_name}")
 
@@ -515,7 +531,71 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                       'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
         return noisy_data
 
-    def apply_noise_ND(self, X, E, y, node_mask, elem_idx, stage, timestamp = None):
+    def get_dataset(self, stage):
+        if stage == 'train':
+            dataset = self.trainer.datamodule.train_dataset
+        elif stage == 'val':
+            dataset = self.trainer.datamodule.val_dataset
+        else:
+            dataset = self.trainer.datamodule.test_dataset
+        return dataset
+    
+    def get_graph_prob_t_s(self, stage, batch, s, t, node_mask):
+        """
+        This function is to compute Q(G_t | X) and Q(G_s | X)
+        if the sample_forward is enables, X is a sample of Q(E),
+        if not, X is Q(E) itself.
+        """
+        eigval_pow_cumsum, eigvec, edge_prob = batch['eigval_pow_cumsum'], batch['eigvec'], batch['edge_prob']
+
+        eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t)]
+        eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s)]
+
+        if not self.cfg.model.sample_forward:
+            E = edge_prob
+
+        probE_t = self.transition_model.forward_diffusion(
+            E,
+            eigval_pow_cumsum_t,
+            eigvec,
+            node_mask,
+            self.cfg.model.sample_forward
+        )
+
+        probE_s = self.transition_model.forward_diffusion(
+            E,
+            eigval_pow_cumsum_s,
+            eigvec,
+            node_mask,
+            self.cfg.model.sample_forward
+        )
+
+        return probE_t, probE_s
+
+    def process_prob_t_s(self, X, E, probE_t, probE_s, y, node_mask):
+        """
+        This function is to sample G_t and G_s from probE_t and probE_s if enabling sample_forward, otherwise keep edge logits as it.
+        Then results will be stored in PlaceHolder, so that the mask can be easily conducted.
+        Note that X and y are all useless.
+        """
+        if self.cfg.model.sample_forward:
+            sampled_t = diffusion_utils.sample_discrete_features(probX=X, probE=probE_t, node_mask=node_mask)
+            sampled_s = diffusion_utils.sample_discrete_features(probX=X, probE=probE_s, node_mask=node_mask)
+
+            E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
+            E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output)
+
+            assert (E.shape == E_t.shape == E_s.shape)
+
+            z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+        else:
+            z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
+
+        return z_t, z_s
+    
+    def apply_noise_ND(self, X, E, y, node_mask, batch, stage, timestamp = None):
         """ Sample noise and apply it to the data. Adapted from apply_noise """
 
         # Sample a timestep t.
@@ -528,51 +608,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             t_int = torch.full(size=(X.size(0), 1), fill_value=timestamp, device=X.device).float()
         s_int = t_int - 1
 
-        if stage == 'train':
-            dataset = self.trainer.datamodule.train_dataset
-        elif stage == 'val':
-            dataset = self.trainer.datamodule.val_dataset
-        else:
-            dataset = self.trainer.datamodule.test_dataset
-
-        eigval_pow_cumsum, eigvec, edge_prob = dataset.get_info(elem_idx)
-        eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t_int)]
-        eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s_int)]
-
-        if not self.cfg.model.sample_forward:
-            E = edge_prob
-
-        probE_t = self.transition_model.get_graph_prob(
-            E,
-            eigval_pow_cumsum_t,
-            eigvec,
-            node_mask,
-            self.cfg.model.sample_forward
-        )
-
-        probE_s = self.transition_model.get_graph_prob(
-            E,
-            eigval_pow_cumsum_s,
-            eigvec,
-            node_mask,
-            self.cfg.model.sample_forward
-        )
-
-        if self.cfg.model.sample_forward:
-            sampled_t = diffusion_utils.sample_discrete_features(probX=X, probE=probE_t, node_mask=node_mask)
-            sampled_s = diffusion_utils.sample_discrete_features(probX=X, probE=probE_s, node_mask=node_mask)
-
-            E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
-
-            E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output)
-            assert (E.shape == E_t.shape == E_s.shape)
-
-            z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
-            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
-        else:
-            z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
-            z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
-
+        probE_t, probE_s = self.get_graph_prob_t_s(stage, batch, s_int, t_int, node_mask)
+        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
 
         noisy_data = {'t': t_int, 
                       'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
@@ -621,45 +658,36 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        'batch_test_nll' if test else 'val_nll': nll}, commit=False)
         return nll
 
-    def forward(self, noisy_data, extra_data, node_mask):
+    def forward(self, noisy_data, extra_data, node_mask, normalize=False):
         X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
         E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
         y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
-        return self.model(X, E, y, node_mask)
+        return self.model(X, E, y, node_mask, normalize)
 
     @torch.no_grad()
-    def sample_chain_E(self, E, node_mask):
+    def sample_chain_E(self, X, E , y, batch, node_mask, stage):
         """ NOTE(jiahang) adapted from sample_batch
         Note that, the returned chain is a reversed chain, that is, [t, t-1, t-2, ..., 0]
         """
         batch_size = E.shape[0]
-        # Sample noise  -- z has size (n_samples, n_nodes, n_features)
-        # NOTE(jiahang): X and Y are useless.
-        z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
-        X, y = z_T.X, z_T.y
-
-        assert (E == torch.transpose(E, 1, 2)).all()
 
         chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
-        chain_E_Gt_1_Gt = torch.zeros(chain_E_size)
-        chain_E_X_Gt = torch.zeros(chain_E_size)
+        chain_E_Gs_Gt = torch.zeros(chain_E_size)
+        chain_E_Gs_X = torch.zeros(chain_E_size)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         for s_int in reversed(range(0, self.T, self.cfg.general.save_chain_every_steps)):
             s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
             t_array = s_array + 1
-            s_norm = s_array / self.T
-            t_norm = t_array / self.T
 
             # Sample z_s
-            sampled_s, _, P_Gt_1_Gt, P_X_Gt= self.sample_p_zs_given_zt(s_norm, t_norm, X, E, y, node_mask)
-            chain_E_Gt_1_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gt_1_Gt[..., -1]
-            chain_E_X_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_X_Gt[..., -1]
-            X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+            P_Gs_Gt, Q_Gs_X= self.get_p_zs_given_zt_ND(stage, X, E, y, batch, s_array, t_array, node_mask)
+            chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
+            chain_E_Gs_X[s_int // self.cfg.general.save_chain_every_steps] = Q_Gs_X[..., -1]
             
-        chain_E_Gt_1_Gt = torch.flip(chain_E_Gt_1_Gt, [0])
-        chain_E_X_Gt = torch.flip(chain_E_X_Gt, [0])
-        return chain_E_Gt_1_Gt.cuda(), chain_E_X_Gt.cuda()
+        chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
+        chain_E_Gs_X = torch.flip(chain_E_Gs_X, [0])
+        return chain_E_Gs_Gt.cuda(), chain_E_Gs_X.cuda()
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -830,6 +858,18 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             prob_E,  pred_E.reshape((bs, n, n, -1))
             # NOTE(Jiahang): hack - p(G^t-1 | G^t) and p(X | G^t)
 
+    def get_p_zs_given_zt_ND(self, stage, X, E, y, batch, s, t, node_mask):
+        probE_t, probE_s = self.get_graph_prob_t_s(stage, batch, s, t, node_mask)
+        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
+        noisy_data = {'t': t, 
+                      'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
+                      'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
+                      'node_mask': node_mask}
+        extra_data = self.compute_extra_data(noisy_data)
+        pred = self.forward(noisy_data, extra_data, node_mask)
+        return pred.E, z_s.E # P(G^t-1 | G^t), Q(G^t-1 | X)
+        
+
     def compute_extra_data(self, noisy_data):
         """ At every training step (after adding noise) and step in sampling, compute extra information and append to
             the network input. """
@@ -847,23 +887,24 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
 
 
-    def update_lp_metrics(self, dense_data, data, node_mask, stage):
+    def update_lp_metrics(self, dense_data, batch, node_mask, stage):
         ''' NOTE(jiahang): 
         * collect X, G_X = argmax(X), P(G^t-1 | G^t) and P(G_X | G^t)
         ** P(G^t-1 | G^t) vs X
-        ** P(G_X | G^t) vs X
+        ** P(G^t-1 | G^t) vs G^t-1
         * target: to measure the performance of reverse process step by step and epoch by epoch
-        ** performance metrics: acc (G_X), auroc (G_X), prec (G_X), rec(G_X), cross_entropy (X)
+        ** performance metrics: acc, auroc, prec, rec, cross_entropy 
         '''
-        true_label, true_logits = get_true(dense_data.E)
-        noisy_data_T = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, timestamp=self.T)
-        E_T = noisy_data_T['E_t']
-        chain_E_Gt_1_Gt, chain_E_X_Gt = self.sample_chain_E(E_T, node_mask)
+        X, E, y = dense_data.X, dense_data.E, batch['g'].y
+        chain_E_Gs_Gt, chain_E_Gs_X = self.sample_chain_E(X, E, y, batch, node_mask, stage)
 
-        mask_E = (dense_data.E != 0.).any(dim=-1)
-        chain_E_Gt_1_Gt = chain_E_Gt_1_Gt[:, mask_E] # P(G^t-1 | G^t)
-        chain_E_X_Gt = chain_E_X_Gt[:, mask_E] # P(X | G^t)
-        self.lp_metric_dict[stage].update(true_label, true_logits, chain_E_Gt_1_Gt, chain_E_X_Gt)
+        mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
+        chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
+        chain_E_Gs_X = chain_E_Gs_X.flatten(1) # P(X | G^t)
+        true_logits = batch['edge_prob']
+        G0 = torch.nn.utils.rnn.pad_sequence(true_logits, batch_first=True).flatten().to(chain_E_Gs_Gt.device)
+        self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_X, mask_E)
+        
 
     def compute_lp_metrics(self, stage):
         chain_metrics = self.lp_metric_dict[stage].compute()
