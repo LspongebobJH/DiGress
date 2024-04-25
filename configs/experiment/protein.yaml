@@ -3,7 +3,7 @@
 # adapted from sbm.yaml
 general:
     name : 'protein'
-    gpus : [0]
+    gpus : [7]
     wandb: 'online'
     resume: null            # If resume, path to ckpt file from outputs directory in main directory
     test_only: null
@@ -27,7 +27,6 @@ model:
     transition: ND
     sample_forward: false
     # diffusion_steps: 1000
-    # diffusion_steps: 100
     diffusion_steps: 20
     n_layers: 8
     lambda_train: [1, 0]
