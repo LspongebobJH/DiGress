@@ -210,7 +210,7 @@ def main(cfg: DictConfig):
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                             #   monitor='val/epoch_NLL',
-                                              monitor='val/auroc_X_G1',
+                                              monitor='val/auroc_G0',
                                               save_top_k=2,
                                             #   mode='min',
                                               mode='max',

@@ -21,6 +21,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                  domain_features):
         super().__init__()
 
+        if len(cfg.general.gpus) > 0:
+            self.device_name = f"cuda:{cfg.general.gpus[0]}"
+        else:
+            self.device_name = "cpu"
+        
         input_dims = dataset_infos.input_dims
         output_dims = dataset_infos.output_dims
         nodes_dist = dataset_infos.nodes_dist
@@ -107,10 +112,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # NOTE(jiahang): to compute metrics relevant to link prediction
         self.lp_metric_valid = LPMetric(stage='val', 
                                         num_steps = self.T // self.cfg.general.save_chain_every_steps, 
-                                        pos_e_w = self.cfg.model.pos_e_w)
+                                        pos_e_w = self.cfg.model.pos_e_w,
+                                        device_name = self.device_name)
         self.lp_metric_test = LPMetric(stage='test', 
                                        num_steps = self.T // self.cfg.general.save_chain_every_steps, 
-                                       pos_e_w = self.cfg.model.pos_e_w)
+                                       pos_e_w = self.cfg.model.pos_e_w,
+                                       device_name = self.device_name)
         self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test}
 
         self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
@@ -119,7 +126,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.val_iterations = None
         self.log_every_steps = cfg.general.log_every_steps
         self.number_chain_steps = cfg.general.number_chain_steps
-        self.best_val_nll = 1e8
+        self.best_auroc_G0 = 0
         self.val_counter = 0
 
     def training_step(self, batch, i):
@@ -170,9 +177,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         to_log = self.train_loss.log_epoch_metrics()
-        self.print(f"Epoch {self.current_epoch}: X_CE: {to_log['train_epoch/x_CE'] :.3f}"
-                      f" -- E_CE: {to_log['train_epoch/E_CE'] :.3f} --"
-                      f" y_CE: {to_log['train_epoch/y_CE'] :.3f}"
+        self.print(f"Epoch {self.current_epoch}: "
+                      f" E_CE: {to_log['train_epoch/E_CE'] :.3f} --"
                       f" -- {time.time() - self.start_epoch_time:.1f}s ")
         epoch_at_metrics, epoch_bond_metrics = self.train_metrics.log_epoch_metrics()
         self.print(f"Epoch {self.current_epoch}: {epoch_at_metrics} -- {epoch_bond_metrics}")
@@ -206,7 +212,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
                    self.val_X_logp.compute(), self.val_E_logp.compute()]
 
-        auroc_G0_1_G1, auroc_X_G1 = self.compute_lp_metrics('valid')
+        auroc_G0 = self.compute_lp_metrics('valid')
 
         if wandb.run:
             wandb.log({"val/epoch_NLL": metrics[0],
@@ -214,8 +220,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        "val/E_kl": metrics[2],
                        "val/X_logp": metrics[3],
                        "val/E_logp": metrics[4],
-                       "val/auroc_G0_1_G1": auroc_G0_1_G1,
-                       "val/auroc_X_G1": auroc_X_G1}, commit=False)
+                       "val/auroc_G0": auroc_G0}, commit=False)
 
 
         self.print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
@@ -224,11 +229,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
         val_nll = metrics[0]
         # self.log("val/epoch_NLL", val_nll, sync_dist=True)
-        self.log("val/auroc_X_G1", auroc_X_G1, sync_dist=True)
+        self.log("val/auroc_G0", auroc_G0, sync_dist=True)
 
-        if val_nll < self.best_val_nll:
-            self.best_val_nll = val_nll
-        self.print('Val loss: %.4f \t Best val loss:  %.4f\n' % (val_nll, self.best_val_nll))
+        if auroc_G0 > self.best_auroc_G0:
+            self.best_auroc_G0 = auroc_G0
+        self.print('Auroc G0: %.4f \t Best Auroc G0:  %.4f\n' % (auroc_G0, self.best_auroc_G0))
 
         self.val_counter += 1
         if self.val_counter % self.cfg.general.sample_every_val == 0:
@@ -291,7 +296,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
                    self.test_X_logp.compute(), self.test_E_logp.compute()]
 
-        auroc_G0_1_G1, auroc_X_G1 = self.compute_lp_metrics('test')
+        auroc_G0 = self.compute_lp_metrics('test')
 
         if wandb.run:
             wandb.log({"test/epoch_NLL": metrics[0],
@@ -299,8 +304,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        "test/E_kl": metrics[2],
                        "test/X_logp": metrics[3],
                        "test/E_logp": metrics[4],
-                       "test/auroc_G0_1_G1": auroc_G0_1_G1,
-                       "test/auroc_X_G1": auroc_X_G1}, commit=False)
+                       "test/auroc_G0": auroc_G0}, commit=False)
             
         
 
@@ -311,7 +315,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if wandb.run:
             wandb.log({"test/epoch_NLL": test_nll}, commit=False)
 
-        self.print(f'Test loss: {test_nll :.4f}')
+        # self.print(f'Test loss: {test_nll :.4f}')
+        self.print(f'Test Auroc G0: {auroc_G0 :.4f}')
 
         samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
         samples_left_to_save = self.cfg.general.final_model_samples_to_save
@@ -651,7 +656,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
         chain_E_Gs_Gt = torch.zeros(chain_E_size)
-        chain_E_Gs_X = torch.zeros(chain_E_size)
+        chain_E_Gs_G0 = torch.zeros(chain_E_size)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         for s_int in reversed(range(0, self.T, self.cfg.general.save_chain_every_steps)):
@@ -659,13 +664,13 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             t_array = s_array + 1
 
             # Sample z_s
-            P_Gs_Gt, Q_Gs_X= self.get_p_zs_given_zt_ND(stage, X, E, y, batch, s_array, t_array, node_mask)
+            P_Gs_Gt, Q_Gs_G0= self.get_p_zs_given_zt_ND(stage, X, E, y, batch, s_array, t_array, node_mask)
             chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
-            chain_E_Gs_X[s_int // self.cfg.general.save_chain_every_steps] = Q_Gs_X[..., -1]
+            chain_E_Gs_G0[s_int // self.cfg.general.save_chain_every_steps] = Q_Gs_G0[..., -1]
             
         chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
-        chain_E_Gs_X = torch.flip(chain_E_Gs_X, [0])
-        return chain_E_Gs_Gt.cuda(), chain_E_Gs_X.cuda()
+        chain_E_Gs_G0 = torch.flip(chain_E_Gs_G0, [0])
+        return chain_E_Gs_Gt.cuda(), chain_E_Gs_G0.cuda()
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -874,14 +879,14 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         ** performance metrics: acc, auroc, prec, rec, cross_entropy 
         '''
         X, E, y = dense_data.X, dense_data.E, batch['g'].y
-        chain_E_Gs_Gt, chain_E_Gs_X = self.sample_chain_E(X, E, y, batch, node_mask, stage)
+        chain_E_Gs_Gt, chain_E_Gs_G0 = self.sample_chain_E(X, E, y, batch, node_mask, stage)
 
         mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
         chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
-        chain_E_Gs_X = chain_E_Gs_X.flatten(1) # P(X | G^t)
+        chain_E_Gs_G0 = chain_E_Gs_G0.flatten(1) # P(X | G^t)
         true_logits = batch['edge_prob']
         G0 = torch.nn.utils.rnn.pad_sequence(true_logits, batch_first=True).flatten().to(chain_E_Gs_Gt.device)
-        self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_X, mask_E)
+        self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E)
         
 
     def compute_lp_metrics(self, stage):
@@ -902,7 +907,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             with open(os.path.join(_dir, f"{self.current_epoch}.pkl"), 'wb') as f:
                 pickle.dump(chain_metrics, f)
 
-        auroc_G0_1_G1, auroc_X_G1 = self.lp_metric_dict[stage].compute_auroc()
-        return auroc_G0_1_G1, auroc_X_G1
+        auroc_G0 = self.lp_metric_dict[stage].compute_auroc()
+        return auroc_G0
 
     

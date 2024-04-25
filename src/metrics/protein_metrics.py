@@ -9,69 +9,74 @@ from src.diffusion import diffusion_utils
 
 class LPMetric:
     full_state_update = False
-    def __init__(self, stage, num_steps, pos_e_w):
+    def __init__(self, stage, num_steps, pos_e_w, device_name='cpu'):
         super().__init__()
         self.stage = stage
 
-        # the auroc only computes on the P(G0|G1) and P(G0|G1).
+        # the auroc only computes on the P(G0|G1)
         ## basically G0 == G0. We check both for sanity check.
+
+        # Gs: estimate q(Gs | G0) with p(Gs | Gt)
+        # G0: estimate q(G0) with p(Gs | Gt)
         self.auroc = {
-            'Gs_Gt': AUROC('binary'),
+            'Gs': AUROC('binary'),
             'G0': AUROC('binary')
         }
         self.acc = {
-            'Gs_Gt': Accuracy('binary', multidim_average='samplewise'),
+            'Gs': Accuracy('binary', multidim_average='samplewise'),
             'G0': Accuracy('binary', multidim_average='samplewise')
         }
         self.prec = {
-            'Gs_Gt': Precision('binary', multidim_average='samplewise'),
+            'Gs': Precision('binary', multidim_average='samplewise'),
             'G0': Precision('binary', multidim_average='samplewise')
         }
         self.rec = {
-            'Gs_Gt': Recall('binary', multidim_average='samplewise'),
+            'Gs': Recall('binary', multidim_average='samplewise'),
             'G0': Recall('binary', multidim_average='samplewise')
         }
         self.ce = {
-            'Gs_Gt': CrossEntropy(num_steps, pos_e_w),
-            'G0': CrossEntropy(num_steps, pos_e_w)
+            'Gs': CrossEntropy(num_steps, pos_e_w).to(device_name),
+            'G0': CrossEntropy(num_steps, pos_e_w).to(device_name)
         }
 
-    def update(self, G0, chain_E_Gs_Gt, chain_E_Gs_X, mask_E):
+    def update(self, G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E):
         # NOTE(jiahang): at the end of each valid and test batch
         num_steps = chain_E_Gs_Gt.shape[0]
-        chain_E_Gs_X_lbls = (chain_E_Gs_X > 0.5).int()
-        G0 = G0.expand(num_steps, -1)
+        chain_E_Gs_G0_lbls = (chain_E_Gs_G0 > 0.5).int()
+        G0 = G0.expand(num_steps, -1).clone()
         G0_lbls = (G0 > 0.5).int()
-        # G0_lbls = 
+        G0[:, ~mask_E] = 0.
+        G0_lbls[:, ~mask_E] = 0
         # true_labels, true_logits = true_labels.expand(num_steps, -1), true_logits.expand(num_steps, -1)
 
         # NOTE(jiahang): we only compute the auroc of 0-th step since auroc not support samplewise.
-        self.auroc['Gs_Gt'].update(chain_E_Gs_Gt[-1, :], chain_E_Gs_X[-1, :])
-        self.auroc['G0'].update(chain_E_Gs_X[-1, :], G0[-1, :])
+        ## so these two auroc should be the same
+        self.auroc['Gs'].update(chain_E_Gs_Gt[-1, :], chain_E_Gs_G0[-1, :])
+        self.auroc['G0'].update(chain_E_Gs_Gt[-1, :], G0[-1, :])
 
-        self.acc['Gs_Gt'].update(chain_E_Gs_Gt, chain_E_Gs_X_lbls)
-        self.acc['G0'].update(chain_E_Gs_X, G0_lbls)
+        self.acc['Gs'].update(chain_E_Gs_Gt, chain_E_Gs_G0_lbls)
+        self.acc['G0'].update(chain_E_Gs_Gt, G0_lbls)
 
-        self.prec['Gs_Gt'].update(chain_E_Gs_Gt, chain_E_Gs_X_lbls)
-        self.prec['G0'].update(chain_E_Gs_X, G0_lbls)
+        self.prec['Gs'].update(chain_E_Gs_Gt, chain_E_Gs_G0_lbls)
+        self.prec['G0'].update(chain_E_Gs_Gt, G0_lbls)
 
-        self.rec['Gs_Gt'].update(chain_E_Gs_Gt, chain_E_Gs_X_lbls)
-        self.rec['G0'].update(chain_E_Gs_X, G0_lbls)
+        self.rec['Gs'].update(chain_E_Gs_Gt, chain_E_Gs_G0_lbls)
+        self.rec['G0'].update(chain_E_Gs_Gt, G0_lbls)
 
-        self.ce['Gs_Gt'].update(chain_E_Gs_Gt, chain_E_Gs_X)
-        self.ce['G0'].update(chain_E_Gs_X, G0)
+        self.ce['Gs'].update(chain_E_Gs_Gt, chain_E_Gs_G0)
+        self.ce['G0'].update(chain_E_Gs_Gt, G0)
 
     def compute(self):
         # NOTE(jiahang): at the end of each valid and test epoch. test has only one epoch.
         chain_metrics = {}
 
         chain_metrics.update({
-            'Gs_Gt': {
-                # 'auroc': self.auroc['Gs_Gt'].compute().cpu(),
-                'acc': self.acc['Gs_Gt'].compute().cpu(),
-                'prec': self.prec['Gs_Gt'].compute().cpu(),
-                'rec': self.rec['Gs_Gt'].compute().cpu(),
-                'ce': self.ce['Gs_Gt'].compute().cpu()
+            'Gs': {
+                # 'auroc': self.auroc['Gs'].compute().cpu(),
+                'acc': self.acc['Gs'].compute().cpu(),
+                'prec': self.prec['Gs'].compute().cpu(),
+                'rec': self.rec['Gs'].compute().cpu(),
+                'ce': self.ce['Gs'].compute().cpu()
             }, 
             'G0': {
                 # 'auroc': self.auroc['G0'].compute().cpu(),
@@ -85,7 +90,8 @@ class LPMetric:
         return chain_metrics
 
     def compute_auroc(self):
-        return self.auroc['Gs_Gt'].compute().item(), self.auroc['G0'].compute().item()
+        # auroc[ p(G0 | G1), q(G0) ]
+        return self.auroc['G0'].compute().item()
 
     def reset(self):
         for metric in [self.auroc, self.acc, self.prec, self.rec, self.ce]:
@@ -102,11 +108,11 @@ class CrossEntropy(Metric):
         ## the actual weight of positive edges = self.pos_w * lambda
         ## 
         self.pos_e_w = pos_e_w # no special weight
-        self.add_state('total_ce', default=torch.zeros(num_steps).cuda(), dist_reduce_fx="sum")
+        self.add_state('total_ce', default=torch.zeros(num_steps), dist_reduce_fx="sum")
         self.add_state('total_samples', default=torch.tensor(0.), dist_reduce_fx="sum")
 
     def update(self, preds: Tensor, target: Tensor) -> None:
-        weight = torch.ones_like(target).cuda()
+        weight = torch.ones_like(target).to(preds.device)
         weight[target >= 0.5] = self.pos_e_w
         output = - (target * torch.log2(preds + 1e-5) * weight).sum(-1)
 
