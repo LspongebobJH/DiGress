@@ -189,6 +189,7 @@ def main(cfg: DictConfig):
     else:
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
+    wandb_status = cfg.general.wandb
     if cfg.general.test_only:
         # When testing, previous configuration is fully loaded
         cfg, _ = get_resume(cfg, model_kwargs)
@@ -197,6 +198,7 @@ def main(cfg: DictConfig):
         # When resuming, we can override some parts of previous configuration
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
+    cfg.general.wandb = wandb_status # to avoid wandb status is replaced when simply debugging checkpoint
 
     utils.create_folders(cfg)
 

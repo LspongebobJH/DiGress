@@ -41,18 +41,16 @@ class LPMetric:
 
     def update(self, G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E):
         # NOTE(jiahang): at the end of each valid and test batch
+        G0, chain_E_Gs_Gt, chain_E_Gs_G0 = \
+            G0[mask_E], chain_E_Gs_Gt[:, mask_E], chain_E_Gs_G0[:, mask_E]
         num_steps = chain_E_Gs_Gt.shape[0]
         chain_E_Gs_G0_lbls = (chain_E_Gs_G0 > 0.5).int()
         G0 = G0.expand(num_steps, -1).clone()
         G0_lbls = (G0 > 0.5).int()
-        G0[:, ~mask_E] = 0.
-        G0_lbls[:, ~mask_E] = 0
-        # true_labels, true_logits = true_labels.expand(num_steps, -1), true_logits.expand(num_steps, -1)
-
         # NOTE(jiahang): we only compute the auroc of 0-th step since auroc not support samplewise.
         ## so these two auroc should be the same
-        self.auroc['Gs'].update(chain_E_Gs_Gt[-1, :], chain_E_Gs_G0[-1, :])
-        self.auroc['G0'].update(chain_E_Gs_Gt[-1, :], G0[-1, :])
+        self.auroc['Gs'].update(chain_E_Gs_Gt[-1, :], chain_E_Gs_G0_lbls[-1, :])
+        self.auroc['G0'].update(chain_E_Gs_Gt[-1, :], G0_lbls[-1, :])
 
         self.acc['Gs'].update(chain_E_Gs_Gt, chain_E_Gs_G0_lbls)
         self.acc['G0'].update(chain_E_Gs_Gt, G0_lbls)

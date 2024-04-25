@@ -645,6 +645,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
         E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
         y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
+        # NOTE(jiahang): we use softmax to normalize binary logits, 
+        ## maybe slightly different from sigmoid and 1 - sigmoid
         return self.model(X, E, y, node_mask, normalize)
 
     @torch.no_grad()
@@ -849,7 +851,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                       'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
                       'node_mask': node_mask}
         extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask)
+        pred = self.forward(noisy_data, extra_data, node_mask, normalize=True)
         return pred.E, z_s.E # P(G^t-1 | G^t), Q(G^t-1 | X)
         
 
