@@ -9,19 +9,20 @@ import re
 import numpy as np
 import pandas as pd
 import torch
-from torch.nn.functional import sigmoid
 from torch.utils.data import random_split
 import torch_geometric.utils
 from torch_geometric.data import InMemoryDataset, download_url
 from torch_geometric.data.makedirs import makedirs
 from torch_geometric.data.dataset import Dataset, _repr, files_exist
+from torch_geometric.utils import to_dense_adj
 from operator import itemgetter
 from src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
+from src.utils import slope_sigmoid
 
 # TODO(jiahang): train-valid-test split not implemented yet
 
 class ProteinDataset(InMemoryDataset):
-    def __init__(self, root, norm, eps, diffusion_steps, 
+    def __init__(self, root, norm, eps, diffusion_steps, slope=1,
                  dataset_name='protein', transform=None, pre_transform=None, pre_filter=None, 
                  force_reload=False):
         self.dataset_name = dataset_name
@@ -30,13 +31,12 @@ class ProteinDataset(InMemoryDataset):
         self.eps = eps
         self.norm = norm
         self.diffusion_steps = diffusion_steps
+        self.slope = slope
         assert self.norm in ['maxmim_norm', 'eigen_norm', 'ND_norm', 'normal']
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
-        self.edge_prob = torch.load(self.processed_paths[1])
-        if self.norm == 'ND_norm':
-            eig = torch.load(self.processed_paths[2])
-            self.eigval_pow_cumsum, self.eigvec = eig['eigval_pow_cumsum'], eig['eigvec']
+        eig = torch.load(self.processed_paths[1])
+        self.eigval_pow_cumsum, self.eigvec = eig['eigval_pow_cumsum'], eig['eigvec']
 
     @property
     def raw_dir(self):
@@ -52,12 +52,7 @@ class ProteinDataset(InMemoryDataset):
     
     @property
     def processed_file_names(self):
-        if self.norm == 'ND_norm':
-            return [f'network_all_{self.norm}_{self.diffusion_steps}.pt', 
-                    f'edge_prob_{self.norm}_{self.diffusion_steps}.pt',
-                    f'eig_{self.diffusion_steps}.pt'
-                ]
-        return [f'network_all_{self.norm}.pt', f'edge_prob_{self.norm}.pt']
+        return [f'network_all_{self.eps}.pt', f'eig_{self.eps}.pt']
 
     def _process(self):
         # taken from PyG original implementations
@@ -101,88 +96,80 @@ class ProteinDataset(InMemoryDataset):
         files = os.listdir(self.raw_dir)
         data_list = []
         eigval_pow_cumsum_list, eigvec_list = [], []
-        edge_prob_list = []
         for filename in tqdm(files):
             if filename.endswith('.mat') or filename.endswith('.pt') or'_ND_' in filename \
                 or ('DI_' not in filename and 'MI_' not in filename):
                 continue
             adj_path = os.path.join(self.raw_dir, filename)
             adj = torch.tensor(np.load(adj_path))
-            if self.norm == 'maxmin_norm':
-                adj = self.maxmin_norm(adj)
-            elif self.norm == 'eigen_norm':
-                adj = self.eigen_norm(adj)
-            elif self.norm in ['ND_norm']:
-                eigval_pow_cumsum, eigvec, adj = self.ND_norm(adj)
-                eigval_pow_cumsum_list.append(eigval_pow_cumsum)
-                eigvec_list.append(eigvec)
-                adj = sigmoid(adj)
-            elif self.norm == 'normal':
-                pass
+            adj = self.normalize_data(adj)
+            eigval, eigvec = torch.linalg.eigh(adj) # this eigval is for cumsum/cumprod compute
+            eigval_pow = torch.stack([eigval ** i for i in range(1, self.diffusion_steps + 1)])
+            eigval_pow_cumsum = torch.cumsum(eigval_pow, dim=0)
+            eigval_pow_cumsum_list.append(eigval_pow_cumsum)
+            eigvec_list.append(eigvec)
             edge_index, edge_prob = torch_geometric.utils.dense_to_sparse(adj)
-            edge_attr = torch.zeros(edge_index.shape[-1], 2, dtype=torch.float)
-            edge_attr[(edge_prob > 0.5) , 1] = 1
-            edge_attr[(edge_prob > 0.5) , 0] = 0
-            edge_attr[~(edge_prob > 0.5) , 1] = 0
-            edge_attr[~(edge_prob > 0.5) , 0] = 1
-            
             num_nodes = adj.shape[0]
             X = torch.ones(num_nodes, 1, dtype=torch.float)
             y = torch.zeros([1, 0]).float() # TODO(jiahang): what's this?
-            data = torch_geometric.data.Data(x=X, edge_index=edge_index, edge_attr=edge_attr,
+            data = torch_geometric.data.Data(x=X, edge_index=edge_index, edge_attr=edge_prob,
                                                 y=y, n_nodes=num_nodes)
 
             data_list.append(data)
-            edge_prob_list.append(adj.flatten())
 
         torch.save(self.collate(data_list), self.processed_paths[0])
-        torch.save(edge_prob_list, self.processed_paths[1])
-        if self.norm == 'ND_norm':
-            torch.save({
-                'eigval_pow_cumsum': eigval_pow_cumsum_list,
-                'eigvec': eigvec_list
-            }, self.processed_paths[2])
-        
+        torch.save({
+            'eigval_pow_cumsum': eigval_pow_cumsum_list,
+            'eigvec': eigvec_list
+        }, self.processed_paths[1])
 
+    def normalize_data(self, adj):
+        # This function name is to avoid name collision with the default one
+        if self.norm in ['maxmin_norm', 'eigen_norm', 'normal']:
+            raise Exception(f"{self.norm} not supported!")
+        elif self.norm in ['ND_norm']:
+            adj = self.ND_norm(adj)
+        return adj
+
+    def __getitem__(self, idx):
+        g = self.get(idx)
+        g.edge_attr = slope_sigmoid(g.edge_attr, self.slope)
+        eigval_pow_cumsum, eigvec = self.get_eig(idx)
+        
+        res = {
+            'g': g,
+            'eigval_pow_cumsum': eigval_pow_cumsum,
+            'eigvec': eigvec,
+        }
+        return res
+
+    def ND_norm(self, data):
+        data = (data + self.eps).log2()
+        data = data - data.mean()
+        eigval = torch.linalg.eigvals(data).abs().max() # this eigval is for norm
+        data = data / (eigval + self.eps)
+        assert (data == torch.transpose(data, 0, 1)).all(), "input data is not symmetric"
+        return data
+
+    def get_eig(self, idx):
+        if isinstance(idx, list):
+            eigval_pow_cumsum = itemgetter(*idx)(self.eigval_pow_cumsum)
+            eigvec = itemgetter(*idx)(self.eigvec)
+        else:
+            eigval_pow_cumsum = self.eigval_pow_cumsum[idx]
+            eigvec = self.eigvec[idx]
+
+        return eigval_pow_cumsum, eigvec
+    
     def maxmin_norm(self, data):
         data = (data - data.min()) / (data.max() - data.min())
         return data
 
-    def eigen_norm(self, data):
-        eigval, _ = torch.linalg.eigh(data)
+    def eigen_norm(self, data, eigval):    
         data = data / (eigval.abs().max() + self.eps)
         return data
 
-    def ND_norm(self, data):
-        data = data - data.mean()
-        data = self.eigen_norm(data)
-        assert (data == torch.transpose(data, 0, 1)).all(), "input data is not symmetric"
-        eigval, eigvec = torch.linalg.eigh(data)
-        eigval_pow = torch.stack([eigval ** i for i in range(1, self.diffusion_steps + 1)])
-        eigval_pow_cumsum = torch.cumsum(eigval_pow, dim=0)
-        return eigval_pow_cumsum, eigvec, data
-
-    def get_info(self, idx):
-        if isinstance(idx, list):
-            eigval_pow_cumsum = itemgetter(*idx)(self.eigval_pow_cumsum)
-            eigvec = itemgetter(*idx)(self.eigvec)
-            edge_prob = itemgetter(*idx)(self.edge_prob)
-        else:
-            eigval_pow_cumsum = self.eigval_pow_cumsum[idx]
-            eigvec = self.eigvec[idx]
-            edge_prob = self.edge_prob[idx]
-
-        return eigval_pow_cumsum, eigvec, edge_prob
-
-    def __getitem__(self, idx):
-        eigval_pow_cumsum, eigvec, edge_prob = self.get_info(idx)
-        res = {
-            'g': self.get(idx),
-            'eigval_pow_cumsum': eigval_pow_cumsum,
-            'eigvec': eigvec,
-            'edge_prob': edge_prob
-        }
-        return res
+    
     
 class ProteinDataModule(AbstractDataModule):
     # TODO(jiahang): getitem in this class and its parent class is of no use?
@@ -194,7 +181,8 @@ class ProteinDataModule(AbstractDataModule):
 
         config = {
             'root': network_path, 'norm': self.cfg.dataset.norm, 'eps': self.cfg.dataset.eps,
-            'diffusion_steps': self.cfg.dataset.diffusion_steps, 'force_reload': self.cfg.dataset.force_reload
+            'diffusion_steps': self.cfg.dataset.diffusion_steps, 'force_reload': self.cfg.dataset.force_reload,
+            'slope': self.cfg.dataset.slope
         }
 
         datasets = {'train': ProteinDataset(**config), 

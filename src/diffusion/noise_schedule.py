@@ -1,8 +1,8 @@
 import numpy as np
 import torch
-from torch.nn.functional import sigmoid
 from src import utils
 from src.diffusion import diffusion_utils
+from src.utils import slope_sigmoid, get_e_mask
 
 
 class PredefinedNoiseSchedule(torch.nn.Module):
@@ -225,10 +225,11 @@ class AbsorbingStateTransition:
 
 class NDTransition:
     # NOTE(jiahang): anything relevant to x and y are useless, won't affect loss and metrics
-    def __init__(self, x_marginals, y_classes, T):
+    def __init__(self, x_marginals, y_classes, T, slope=1.):
         self.X_classes = len(x_marginals)
         self.y_classes = y_classes
         self.x_marginals = x_marginals
+        self.slope = slope
 
         self.u_x = x_marginals.unsqueeze(0).expand(self.X_classes, -1).unsqueeze(0)
         self.u_y = torch.ones(1, self.y_classes, self.y_classes)
@@ -242,9 +243,9 @@ class NDTransition:
         E_list = []
         if sample_forward:
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
-                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten()
+                e_mask = get_e_mask(n_mask).flatten()
                 new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0])), 2).double().cuda()
-                new_E[e_mask, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten() # set edge presence prob to f(sigma t)
+                new_E[e_mask, 1] = slope_sigmoid(vec @ torch.diag(val) @ vec.T, self.slope).flatten() # set edge presence prob to f(sigma t)
                 new_E[_E[..., -1].bool().flatten(), 1] = 1. # set such prob of existing edges to 1
                 new_E[..., 0] = 1. - new_E[..., 1]
                 new_E[torch.eye(len(node_mask[0])).bool().flatten()] = 0. # remove self loop
@@ -253,14 +254,14 @@ class NDTransition:
                 E_list.append(new_E)
         else:
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
-                e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(0).float()).bool().flatten()
+                e_mask = get_e_mask(n_mask).flatten()
                 new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 1, 2)).double().cuda()
                 new_E[e_mask, 0, 1] = _E
                 new_E[e_mask, 0, 0] = 1 - _E
                 Qt = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 2, 2)).double().cuda()
                 Qt[e_mask, 1, 0] = 0.
                 Qt[e_mask, 1, 1] = 1.
-                Qt[e_mask, 0, 1] = sigmoid(vec @ torch.diag(val) @ vec.T).flatten()
+                Qt[e_mask, 0, 1] = slope_sigmoid(vec @ torch.diag(val) @ vec.T, self.slope).flatten()
                 Qt[e_mask, 0, 0] = 1. - Qt[e_mask, 0, 1]
                 new_E = new_E @ Qt
                 new_E = new_E.squeeze(1).reshape(len(node_mask[0]), len(node_mask[0]), 2)

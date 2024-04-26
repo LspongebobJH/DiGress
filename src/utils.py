@@ -57,7 +57,12 @@ def to_dense(x, edge_index, edge_attr, batch):
     # TODO: carefully check if setting node_mask as a bool breaks the continuous case
     max_num_nodes = X.size(1)
     E = to_dense_adj(edge_index=edge_index, batch=batch, edge_attr=edge_attr, max_num_nodes=max_num_nodes)
-    E = encode_no_edge(E)
+    E = torch.stack([1. - E, E], dim=-1)
+    e_mask = get_e_mask(node_mask)
+    E[~e_mask, ...] = 0.
+    
+    # E = encode_no_edge(E) TODO(jiahang): what is it? seems that we don't need this.
+    # NOTE(performance, jiahang): if performance degrades, it could be the problem above. 
 
     return PlaceHolder(X=X, E=E, y=None), node_mask
 
@@ -137,3 +142,14 @@ def setup_wandb(cfg):
               'settings': wandb.Settings(_disable_stats=True), 'reinit': True, 'mode': cfg.general.wandb}
     wandb.init(**kwargs)
     wandb.save('*.txt')
+
+def slope_sigmoid(data, slope=1.):
+    if slope == 1.:
+        from torch.nn.functional import sigmoid
+        return sigmoid(data)
+    else:
+        return 1. / (1. + torch.exp(- slope * data))
+
+def get_e_mask(n_mask):
+    e_mask = (n_mask.unsqueeze(-1).float() @ n_mask.unsqueeze(-2).float()).bool()
+    return e_mask

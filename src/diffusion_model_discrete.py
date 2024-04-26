@@ -15,16 +15,20 @@ from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from metrics.protein_metrics import LPMetric
 from src import utils
+from torch_geometric.utils import to_dense_adj
 
 class DiscreteDenoisingDiffusion(pl.LightningModule):
     def __init__(self, cfg, dataset_infos, train_metrics, sampling_metrics, visualization_tools, extra_features,
                  domain_features):
         super().__init__()
 
+        assert not cfg.model.sample_forward, f"sample_forward: {self.cfg.model.sample_forward} is not supported yet"
         if len(cfg.general.gpus) > 0:
             self.device_name = f"cuda:{cfg.general.gpus[0]}"
         else:
             self.device_name = "cpu"
+
+        slope = cfg.model.slope
         
         input_dims = dataset_infos.input_dims
         output_dims = dataset_infos.output_dims
@@ -105,7 +109,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             edge_types = self.dataset_info.edge_types.float()
             e_marginals = edge_types / torch.sum(edge_types)
 
-            self.transition_model = NDTransition(x_marginals, y_classes=self.ydim_output, T=self.T)
+            self.transition_model = NDTransition(x_marginals, y_classes=self.ydim_output, T=self.T, slope=slope)
             self.limit_dist = utils.PlaceHolder(X=x_marginals, E=e_marginals,
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
             
@@ -529,7 +533,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if the sample_forward is enables, X is a sample of Q(E),
         if not, X is Q(E) itself.
         """
-        eigval_pow_cumsum, eigvec, edge_prob = batch['eigval_pow_cumsum'], batch['eigvec'], batch['edge_prob']
+        eigval_pow_cumsum, eigvec, edge_prob = batch['eigval_pow_cumsum'], batch['eigvec'], batch['g'].edge_attr
 
         eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t)]
         eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s)]
@@ -886,8 +890,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
         chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
         chain_E_Gs_G0 = chain_E_Gs_G0.flatten(1) # P(X | G^t)
-        true_logits = batch['edge_prob']
-        G0 = torch.nn.utils.rnn.pad_sequence(true_logits, batch_first=True).flatten().to(chain_E_Gs_Gt.device)
+        # we only need the edge presence probability as the ground truth
+        ## to compute metrics
+        G0 = E[..., -1].flatten() 
         self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E)
         
 
@@ -912,4 +917,3 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         auroc_G0 = self.lp_metric_dict[stage].compute_auroc()
         return auroc_G0
 
-    

@@ -1,6 +1,16 @@
 # @package _global_
 
 # adapted from sbm.yaml
+dataset:
+    name: protein
+    remove_h: null
+    network_dir: 'data/ND-code-datasets/Application2-protein-contact-maps/full-predictions'
+    force_reload: False
+    norm: ND_norm
+
+    eps: 1e-2 # only used in eigen norm and ND norm
+    diffusion_steps: ${model.diffusion_steps} # only used in ND norm
+    slope: 1 # only used in ND norm for changing slope of sigmoid
 general:
     name : 'protein'
     gpus : [7]
@@ -24,8 +34,13 @@ train:
     batch_size: 5
     save_model: True
 model:
+    # NOTE(jiahang): note the difference between model.slope and dataset.slope
+    ## model.slope will be used in all slope_sigmoid for computing f(t)
+    ## dataset.slope will be used in only computing q(G0)
+    ## for simplification we let model.slope = dataset.slope
+    slope: ${dataset.slope}
     transition: ND
-    sample_forward: false
+    sample_forward: false # true is not supported yet!
     # diffusion_steps: 1000
     diffusion_steps: 20
     n_layers: 8
