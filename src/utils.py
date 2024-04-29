@@ -131,8 +131,10 @@ class PlaceHolder:
             self.E[(e_mask1 * e_mask2).squeeze(-1) == 0] = - 1
         else:
             self.X = self.X * x_mask
-            self.E = self.E * e_mask1 * e_mask2
+            self.E = (self.E * e_mask1 * e_mask2).clone()
             assert torch.allclose(self.E, torch.transpose(self.E, 1, 2))
+            # remove self loops
+            self.E[:, torch.eye(node_mask.shape[-1]).bool(), :] = 0.
         return self
 
 
