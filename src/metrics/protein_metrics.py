@@ -41,7 +41,7 @@ class LPMetric:
 
     def update(self, G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E):
         # NOTE(jiahang): at the end of each valid and test batch
-        # TODO(jiahang): seems that chain_E_Gs_Gt forget removing self loops
+
         G0, chain_E_Gs_Gt, chain_E_Gs_G0 = \
             G0[mask_E], chain_E_Gs_Gt[:, mask_E], chain_E_Gs_G0[:, mask_E]
         num_steps = chain_E_Gs_Gt.shape[0]

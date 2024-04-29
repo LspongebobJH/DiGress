@@ -156,3 +156,4 @@ src/analysis/orca/tmp*
 
 .vscode/
 chain_results/
+*.pkl
