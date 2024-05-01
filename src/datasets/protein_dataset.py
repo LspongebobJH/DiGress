@@ -18,6 +18,7 @@ from torch_geometric.utils import to_dense_adj
 from operator import itemgetter
 from src.datasets.abstract_dataset import AbstractDataModule, AbstractDatasetInfos
 from src.utils import slope_sigmoid
+from torch.utils.data import Dataset
 
 # TODO(jiahang): train-valid-test split not implemented yet
 
@@ -37,6 +38,7 @@ class ProteinDataset(InMemoryDataset):
         self.data, self.slices = torch.load(self.processed_paths[0])
         eig = torch.load(self.processed_paths[1])
         self.eigval_pow_cumsum, self.eigvec = eig['eigval_pow_cumsum'], eig['eigvec']
+        self.idx = torch.load(self.processed_paths[2])
 
     @property
     def raw_dir(self):
@@ -52,7 +54,7 @@ class ProteinDataset(InMemoryDataset):
     
     @property
     def processed_file_names(self):
-        return [f'network_all_{self.eps}.pt', f'eig_{self.eps}.pt']
+        return [f'network_all_{self.eps}.pt', f'eig_{self.eps}.pt', f'idx_{self.eps}.pt']
 
     def _process(self):
         # taken from PyG original implementations
@@ -94,12 +96,14 @@ class ProteinDataset(InMemoryDataset):
     
     def process(self):
         files = os.listdir(self.raw_dir)
-        data_list = []
+        data_list, idx_list = [], []
         eigval_pow_cumsum_list, eigvec_list = [], []
         for filename in tqdm(files):
             if filename.endswith('.mat') or filename.endswith('.pt') or'_ND_' in filename \
                 or ('DI_' not in filename and 'MI_' not in filename):
                 continue
+            idx = filename.split('I_')[1].split('.npy')[0]
+            idx_list.append(idx)
             adj_path = os.path.join(self.raw_dir, filename)
             adj = torch.tensor(np.load(adj_path))
             adj = self.normalize_data(adj)
@@ -122,6 +126,7 @@ class ProteinDataset(InMemoryDataset):
             'eigval_pow_cumsum': eigval_pow_cumsum_list,
             'eigvec': eigvec_list
         }, self.processed_paths[1])
+        torch.save(idx_list, self.processed_paths[2])
 
     def normalize_data(self, adj):
         # This function name is to avoid name collision with the default one
@@ -135,11 +140,13 @@ class ProteinDataset(InMemoryDataset):
         g = self.get(idx)
         g.edge_attr = slope_sigmoid(g.edge_attr, self.slope)
         eigval_pow_cumsum, eigvec = self.get_eig(idx)
+        g_idx = self.idx[idx]
         
         res = {
             'g': g,
             'eigval_pow_cumsum': eigval_pow_cumsum,
             'eigvec': eigvec,
+            'g_idx': g_idx
         }
         return res
 
@@ -169,7 +176,122 @@ class ProteinDataset(InMemoryDataset):
         data = data / (eigval.abs().max() + self.eps)
         return data
 
+class ProteinGoldenDataset(InMemoryDataset):
+    def __init__(self, root, force_reload):
+        self.network_path = root
+        self.force_reload = force_reload
+        super().__init__(root = root)
+        self.data, self.slices = torch.load(self.processed_paths[0])
+        self.idx = torch.load(self.processed_paths[1])
+
+    @property
+    def raw_dir(self):
+        return self.network_path
     
+    @property
+    def raw_file_names(self):
+        return []
+
+    @property
+    def processed_dir(self):
+        return self.raw_dir
+
+    @property
+    def processed_file_names(self):
+        return [f'golden_all.pt', 'golden_idx.pt']
+    
+    def _process(self):
+        # taken from PyG original implementations
+        f = osp.join(self.processed_dir, 'pre_transform.pt')
+        if osp.exists(f) and torch.load(f) != _repr(self.pre_transform):
+            warnings.warn(
+                f"The `pre_transform` argument differs from the one used in "
+                f"the pre-processed version of this dataset. If you want to "
+                f"make use of another pre-processing technique, make sure to "
+                f"delete '{self.processed_dir}' first")
+
+        f = osp.join(self.processed_dir, 'pre_filter.pt')
+        if osp.exists(f) and torch.load(f) != _repr(self.pre_filter):
+            warnings.warn(
+                "The `pre_filter` argument differs from the one used in "
+                "the pre-processed version of this dataset. If you want to "
+                "make use of another pre-fitering technique, make sure to "
+                "delete '{self.processed_dir}' first")
+
+        if not self.force_reload and files_exist(self.processed_paths):  # pragma: no cover
+            return
+        
+        if self.force_reload:
+            print('Force re-processing...', file=sys.stderr)
+
+        if self.log and 'pytest' not in sys.modules:
+            print('Processing...', file=sys.stderr)
+
+        makedirs(self.processed_dir)
+        self.process()
+
+        path = osp.join(self.processed_dir, 'pre_transform.pt')
+        torch.save(_repr(self.pre_transform), path)
+        path = osp.join(self.processed_dir, 'pre_filter.pt')
+        torch.save(_repr(self.pre_filter), path)
+
+        if self.log and 'pytest' not in sys.modules:
+            print('Done!', file=sys.stderr)
+    
+    def process(self):
+        files = os.listdir(self.raw_dir)
+        data_list, idx_list = [], []
+        for filename in tqdm(files):
+            if not ('contact' in filename and '.mat' not in filename and '.pt' not in filename):
+                continue
+
+            # get index
+            idx = filename.split('contact_')[1].split('.npy')[0]
+            idx_list.append(idx)
+            adj_path = os.path.join(self.raw_dir, filename)
+            adj = torch.tensor(np.load(adj_path))
+            edge_index, edge_attr = torch_geometric.utils.dense_to_sparse(adj)
+            num_nodes = adj.shape[0]
+            X = torch.ones(num_nodes, 1, dtype=torch.float)
+            y = torch.zeros([1, 0]).float() # TODO(jiahang): what's this?
+            data = torch_geometric.data.Data(x=X, edge_index=edge_index, edge_attr=edge_attr,
+                                                y=y, n_nodes=num_nodes)
+
+            data_list.append(data)
+
+
+        torch.save(self.collate(data_list), self.processed_paths[0])
+        torch.save(idx_list, self.processed_paths[1])
+
+    def __getitem__(self, idx):
+        g = self.get(idx)
+        g_idx = self.idx[idx]
+        
+        res = {
+            'golden_g': g,
+            'golden_idx': g_idx,
+        }
+        return res
+
+class ProteinInferDataset(Dataset):
+    def __init__(self, **kwargs):
+        self.data = ProteinDataset(**kwargs)
+        self.golden = ProteinGoldenDataset(kwargs['root'], kwargs['force_reload'])
+        super().__init__()
+
+    def __getitem__(self, idx):
+        res = {}
+        cur_data = self.data[idx]
+        g_idx = cur_data['g_idx']
+        golden_idx_list = self.golden.idx
+        golden_pos = golden_idx_list.index(g_idx)
+        res.update(cur_data)
+        res.update(self.golden[golden_pos])
+        return res
+
+    def __len__(self):
+        return len(self.data)
+
     
 class ProteinDataModule(AbstractDataModule):
     # TODO(jiahang): getitem in this class and its parent class is of no use?
@@ -187,7 +309,8 @@ class ProteinDataModule(AbstractDataModule):
 
         datasets = {'train': ProteinDataset(**config), 
                     'val': ProteinDataset(**config), 
-                    'test': ProteinDataset(**config)
+                    'test': ProteinDataset(**config) if not cfg.general.infer else \
+                        ProteinInferDataset(**config)
                 }
 
         super().__init__(cfg, datasets)

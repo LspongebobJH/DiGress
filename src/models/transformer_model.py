@@ -282,6 +282,6 @@ class GraphTransformer(nn.Module):
         E = 1/2 * (E + torch.transpose(E, 1, 2))
 
         if normalize:
-            E = F.softmax(E, dim=-1)
+            E = F.softmax(E, dim=-1) # TODO(jiahang): may also need slope
 
         return utils.PlaceHolder(X=X, E=E, y=y).mask(node_mask)

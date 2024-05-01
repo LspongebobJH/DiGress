@@ -13,7 +13,7 @@ from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseS
 from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
-from metrics.protein_metrics import LPMetric
+from metrics.protein_metrics import LPMetric, LPInferMetric
 from src import utils
 from torch_geometric.utils import to_dense_adj
 
@@ -29,6 +29,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             self.device_name = "cpu"
 
         slope = cfg.model.slope
+        self.infer = cfg.general.infer
         
         input_dims = dataset_infos.input_dims
         output_dims = dataset_infos.output_dims
@@ -114,15 +115,14 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                                                 y=torch.ones(self.ydim_output) / self.ydim_output)
             
         # NOTE(jiahang): to compute metrics relevant to link prediction
-        self.lp_metric_valid = LPMetric(stage='val', 
-                                        num_steps = self.T // self.cfg.general.save_chain_every_steps, 
-                                        pos_e_w = self.cfg.model.pos_e_w,
-                                        device_name = self.device_name)
-        self.lp_metric_test = LPMetric(stage='test', 
-                                       num_steps = self.T // self.cfg.general.save_chain_every_steps, 
-                                       pos_e_w = self.cfg.model.pos_e_w,
-                                       device_name = self.device_name)
-        self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test}
+        config = {'num_steps': self.T // self.cfg.general.save_chain_every_steps, 'pos_e_w': self.cfg.model.pos_e_w,
+                  'device_name': self.device_name}
+        self.lp_metric_valid = LPMetric(stage='val', **config)
+        self.lp_metric_test = LPMetric(stage='test', **config)
+        self.lp_metric_infer = LPInferMetric(stage='infer', **config)
+        self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test, 'infer': self.lp_metric_infer}
+        self.chain_E_Gs_Gt_list_test, self.chain_E_Gs_G0_list_test = [], []
+        self.chain_E_Gs_Gt_list_infer = []
 
         self.save_hyperparameters(ignore=['train_metrics', 'sampling_metrics'])
         self.start_epoch_time = None
@@ -138,10 +138,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if g.edge_index.numel() == 0:
             self.print("Found a batch with no edges. Skipping.")
             return
-        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
+        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch, g.y)
         dense_data = dense_data.mask(node_mask)
         X, E = dense_data.X, dense_data.E
-        noisy_data = self.apply_noise_ND(dense_data.X, dense_data.E, g.y, node_mask, batch, 'train')
+        eig = {'eigval_pow_cumsum': batch['eigval_pow_cumsum'], 'eigvec': batch['eigvec']}
+        noisy_data = self.apply_noise_ND(dense_data.X, dense_data.E, dense_data.y, eig, node_mask, 'train')
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
         # predict G0
@@ -199,15 +200,15 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
     def validation_step(self, batch, i):
         g = batch['g']
-        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
+        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch, g.y)
         dense_data = dense_data.mask(node_mask)
         # NOTE(jiahang): neglect computing ELBO to simplify engineering effort
         # noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask, data.batch.unique(), 'valid')
         # extra_data = self.compute_extra_data(noisy_data)
         # pred = self.forward(noisy_data, extra_data, node_mask)
         # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
-
-        self.update_lp_metrics(dense_data, batch, node_mask, 'valid')
+        eig = {'eigval_pow_cumsum': batch['eigval_pow_cumsum'], 'eigvec': batch['eigvec']}
+        _, _ = self.update_lp_metrics(dense_data, eig, node_mask, 'valid')
         
         # return {'loss': nll}
         return {'loss': 0.0}
@@ -277,50 +278,71 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.test_X_logp.reset()
         self.test_E_logp.reset()
         self.lp_metric_test.reset()
+        self.lp_metric_infer.reset()
+        self.chain_E_Gs_Gt_list_test.clear()
+        self.chain_E_Gs_G0_list_test.clear()
+        self.chain_E_Gs_Gt_list_infer.clear()
         if self.local_rank == 0:
             utils.setup_wandb(self.cfg)
 
     def test_step(self, batch, i):
-        g = batch['g']
-        dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch)
-        dense_data = dense_data.mask(node_mask)
-        # NOTE(jiahang): neglect computing ELBO to simplify engineering effort
-        # noisy_data = self.apply_noise(dense_data.X, dense_data.E, g.y, node_mask)
-        # extra_data = self.compute_extra_data(noisy_data)
-        # pred = self.forward(noisy_data, extra_data, node_mask)
-        # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, g.y, node_mask, test=True)
+        if self.infer:
+            g, golden_g = batch['g'], batch['golden_g']
+            eig = {'eigval_pow_cumsum': batch['eigval_pow_cumsum'], 'eigvec': batch['eigvec']}
+            dense_g, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch, g.y)
+            dense_g = dense_g.mask(node_mask)
+            dense_gold, _ = utils.to_dense(golden_g.x, golden_g.edge_index, golden_g.edge_attr, golden_g.batch, g.y)
+            dense_gold = dense_gold.mask(node_mask)
 
-        self.update_lp_metrics(dense_data, batch, node_mask, 'test')
-        
-        # return {'loss': nll}
+            chain_E_Gs_Gt = self.update_lp_metrics_infer(dense_g, dense_gold, eig, node_mask)
+            self.chain_E_Gs_Gt_list_infer.append(chain_E_Gs_Gt)
+                
+        else:
+            g = batch['g']
+            dense_data, node_mask = utils.to_dense(g.x, g.edge_index, g.edge_attr, g.batch, g.y)
+            dense_data = dense_data.mask(node_mask)
+            # NOTE(jiahang): neglect computing ELBO to simplify engineering effort
+            # noisy_data = self.apply_noise(dense_data.X, dense_data.E, g.y, node_mask)
+            # extra_data = self.compute_extra_data(noisy_data)
+            # pred = self.forward(noisy_data, extra_data, node_mask)
+            # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, g.y, node_mask, test=True)
+            eig = {'eigval_pow_cumsum': batch['eigval_pow_cumsum'], 'eigvec': batch['eigvec']}
+            chain_E_Gs_Gt, chain_E_Gs_G0 = self.update_lp_metrics(dense_data, batch, node_mask, 'test')
+            self.chain_E_Gs_Gt_list_test.append(chain_E_Gs_Gt)
+            self.chain_E_Gs_G0_list_test.append(chain_E_Gs_G0)
+
         return {'loss': 0.0}
 
     def on_test_epoch_end(self) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
+        stage = 'test' if not self.infer else 'infer'
         metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
                    self.test_X_logp.compute(), self.test_E_logp.compute()]
 
-        auroc_G0 = self.compute_lp_metrics('test')
-
-        if wandb.run:
-            wandb.log({"test/epoch_NLL": metrics[0],
-                       "test/X_kl": metrics[1],
-                       "test/E_kl": metrics[2],
-                       "test/X_logp": metrics[3],
-                       "test/E_logp": metrics[4],
-                       "test/auroc_G0": auroc_G0}, commit=False)
-            
+        auroc_G0 = self.compute_lp_metrics(stage)
+        if self.infer:
+            self.store_lp_results(self.chain_E_Gs_Gt_list_infer, stage, f"Gs_Gt.pkl")
+        else:
+            self.store_lp_results(self.chain_E_Gs_Gt_list_test, stage, f"Gs_Gt.pkl")
+            self.store_lp_results(self.chain_E_Gs_G0_list_test, stage, f"Gs_G0.pkl")
         
-
-        self.print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
-                   f"Test Edge type KL: {metrics[2] :.2f}")
+        if wandb.run:
+            wandb.log({f"{stage}/epoch_NLL": metrics[0],
+                       f"{stage}/X_kl": metrics[1],
+                       f"{stage}/E_kl": metrics[2],
+                       f"{stage}/X_logp": metrics[3],
+                       f"{stage}/E_logp": metrics[4],
+                       f"{stage}/auroc_G0": auroc_G0}, commit=False)
+            
+        self.print(f"Epoch {self.current_epoch}: {stage} NLL {metrics[0] :.2f} -- {stage} Atom type KL {metrics[1] :.2f} -- ",
+                   f"{stage} Edge type KL: {metrics[2] :.2f}")
 
         test_nll = metrics[0]
         if wandb.run:
-            wandb.log({"test/epoch_NLL": test_nll}, commit=False)
+            wandb.log({f"{stage}/epoch_NLL": test_nll}, commit=False)
 
         # self.print(f'Test loss: {test_nll :.4f}')
-        self.print(f'Test Auroc G0: {auroc_G0 :.4f}')
+        self.print(f'{stage} Auroc G0: {auroc_G0 :.4f}')
 
         samples_left_to_generate = self.cfg.general.final_model_samples_to_generate
         samples_left_to_save = self.cfg.general.final_model_samples_to_save
@@ -365,6 +387,235 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.print("Generated graphs Saved. Computing sampling metrics...")
         self.sampling_metrics(samples, self.name, self.current_epoch, self.val_counter, test=True, local_rank=self.local_rank)
         self.print("Done testing.")
+
+    def get_dataset(self, stage):
+        if stage == 'train':
+            dataset = self.trainer.datamodule.train_dataset
+        elif stage == 'val':
+            dataset = self.trainer.datamodule.val_dataset
+        else:
+            dataset = self.trainer.datamodule.test_dataset
+        return dataset
+    
+    def apply_noise_ND(self, X, E, y, eig, node_mask, timestamp = None):
+        """ Sample noise and apply it to the data. Adapted from apply_noise """
+
+        # Sample a timestep t.
+        # When evaluating, the loss for t=0 is computed separately
+        t_int = torch.randint(1, self.T, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
+        # NOTE(jiahang): I make self.T + 1 to self.T to simplify engineering work
+        s_int = t_int - 1
+
+        probE_t, probE_s = self.get_graph_prob_t_s_given_0(E, eig, s_int, t_int, node_mask)
+        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
+
+        noisy_data = {'t': t_int, 
+                      'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
+                      'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
+                      'node_mask': node_mask}
+        return noisy_data
+
+    def forward(self, noisy_data, extra_data, node_mask, normalize=False):
+        X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
+        E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
+        y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
+        # NOTE(jiahang): we use softmax to normalize binary logits, 
+        ## maybe slightly different from sigmoid and 1 - sigmoid
+        return self.model(X, E, y, node_mask, normalize)
+
+    @torch.no_grad()
+    def sample_chain_E(self, X, E, y, eig, node_mask):
+        """ NOTE(jiahang) adapted from sample_batch
+        Note that, the returned chain is a reversed chain, that is, [t, t-1, t-2, ..., 0]
+        """
+        batch_size = E.shape[0]
+
+        chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
+        chain_E_Gs_Gt = torch.zeros(chain_E_size)
+        chain_E_Gs_G0 = torch.zeros(chain_E_size)
+
+        # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
+        if self.infer:
+            for t_int in reversed(range(1, self.T, self.cfg.general.save_chain_every_steps)):
+                s_int = t_int - 1
+                t_array = t_int * torch.ones((batch_size, 1)).type_as(y)
+                P_Gs_Gt = self.get_p_st(X, E, y, t_array, node_mask)
+                chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
+                E = P_Gs_Gt
+
+            chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
+            return chain_E_Gs_Gt.cuda()
+        else:
+            for s_int in reversed(range(0, self.T - 1, self.cfg.general.save_chain_every_steps)):
+                s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
+                t_array = s_array + 1
+
+                # Sample z_s
+                P_Gs_Gt, Q_Gs_G0= self.get_p_st_q_s0_0(X, E, y, eig, s_array, t_array, node_mask)
+                chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
+                chain_E_Gs_G0[s_int // self.cfg.general.save_chain_every_steps] = Q_Gs_G0[..., -1]
+                
+            chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
+            chain_E_Gs_G0 = torch.flip(chain_E_Gs_G0, [0])
+            return chain_E_Gs_Gt.cuda(), chain_E_Gs_G0.cuda()
+
+    def get_graph_prob_t_s_given_0(self, E, eig, s, t, node_mask):
+        """
+        This function is to compute Q(G_t | X) and Q(G_s | X)
+        if the sample_forward is enables, X is a sample of Q(E),
+        if not, X is Q(E) itself.
+        """
+        eigval_pow_cumsum, eigvec = eig['eigval_pow_cumsum'], eig['eigvec']
+        
+        # t = s + 1, so t will not be 0
+        t = t - 1.
+        eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t)]
+        probE_t = self.transition_model.forward_diffusion(
+            E,
+            eigval_pow_cumsum_t,
+            eigvec,
+            node_mask,
+            self.cfg.model.sample_forward
+        )
+        
+        # - 1: that is because Qt_bar[0] correspond to Q1_bar! Note that t won't be 0
+        if s[0] - 1 >= 0.:
+            s = s - 1.
+            eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s)]
+            probE_s = self.transition_model.forward_diffusion(
+                E,
+                eigval_pow_cumsum_s,
+                eigvec,
+                node_mask,
+                self.cfg.model.sample_forward
+            )
+        # at this case, the probE_t should be the input graph
+        else:
+            probE_s = E
+
+        return probE_t, probE_s
+
+    def process_prob_t_s(self, X, E, probE_t, probE_s, y, node_mask):
+        """
+        This function is to sample G_t and G_s from probE_t and probE_s if enabling sample_forward, otherwise keep edge logits as it.
+        Then results will be stored in PlaceHolder, so that the mask and self-loop removal can be easily conducted.
+        Note that X and y are all useless.
+        """
+        if self.cfg.model.sample_forward:
+            sampled_t = diffusion_utils.sample_discrete_features(probX=X, probE=probE_t, node_mask=node_mask)
+            sampled_s = diffusion_utils.sample_discrete_features(probX=X, probE=probE_s, node_mask=node_mask)
+
+            E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
+            E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output)
+
+            assert (E.shape == E_t.shape == E_s.shape)
+
+            z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+        else:
+            z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
+
+        return z_t, z_s
+    
+    def get_p_st_q_s0_0(self, X, E, y, eig, s, t, node_mask):
+        """
+        return value: P(Gs | Gt) and Q(Gs | G0), s ~ [0, T - 2], t ~ [1, T - 1]
+        when s == 0, t == 1, p(Gs | Gt) is given by the model(Gt), and Q(Gs | G0) is G0.
+        Note that in this func, p(Gs | Gt) and Q(Gs | G0) are computed based on G0, that is, 
+        Gt = forward_diffusion(G0)
+        """
+        probE_t, probE_s = self.get_graph_prob_t_s_given_0(E, eig, s, t, node_mask)
+        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
+        noisy_data = {'t': t, 
+                    'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
+                    'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
+                    'node_mask': node_mask}
+        extra_data = self.compute_extra_data(noisy_data)
+        pred = self.forward(noisy_data, extra_data, node_mask, normalize=True)
+        return pred.E, z_s.E # P(G^t-1 | G^t), Q(G^t-1 | X)
+
+    def get_p_st(self, X, E, y, t, node_mask):
+        z_t = utils.PlaceHolder(X=X, E=E, y=y).mask(node_mask)
+        noisy_data = {'t': t, 
+                    'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
+                    'node_mask': node_mask}
+        extra_data = self.compute_extra_data(noisy_data)
+        pred = self.forward(noisy_data, extra_data, node_mask, normalize=True)
+        return pred.E
+        
+    def update_lp_metrics(self, dense_data, eig, node_mask, stage):
+        ''' NOTE(jiahang): 
+        * collect:
+        ** P(G^t-1 | G^t) vs Q(G^t-1 | G0)
+        ** P(G^t-1 | G^t) vs Q(G0)
+        ** performance metrics: acc, auroc, prec, rec, cross_entropy 
+        ** Note that G^T is obtained by forward_diffusion(G0)
+        '''
+        X, E, y = dense_data.X, dense_data.E, dense_data.y
+        chain_E_Gs_Gt, chain_E_Gs_G0 = self.sample_chain_E(X, E, y, eig, node_mask)
+
+        mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
+        chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
+        chain_E_Gs_G0 = chain_E_Gs_G0.flatten(1) # P(X | G^t)
+        # we only need the edge presence probability as the ground truth
+        ## to compute metrics
+        G0 = E[..., -1].flatten() 
+        self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E)
+        return chain_E_Gs_Gt.cpu(), chain_E_Gs_G0.cpu()
+
+    def update_lp_metrics_infer(self, dense_g, dense_gold, eig, node_mask):
+        ''' NOTE(jiahang): 
+        * collect:
+        ** NO P(G^t-1 | G^t) vs Q(G^t-1 | G0), since Q(G^t-1 | G0) is not implemented
+        ** P(G^t-1 | G^t) vs Q(G0)
+        ** performance metrics: acc, auroc, prec, rec, cross_entropy 
+        ** Note that G^T is the input graph, and G0 is the corresponding golden graph, that is
+        *** GT is NOT obtained by forward_diffusion(G0)
+        '''
+        chain_E_Gs_Gt = self.sample_chain_E(dense_g.X, dense_g.E, dense_g.y, eig, node_mask)
+
+        mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
+        chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
+        # we only need the edge presence probability as the ground truth
+        ## to compute metrics
+        G0 = dense_gold.E[..., -1].flatten()
+        self.lp_metric_infer.update(G0, chain_E_Gs_Gt, mask_E)
+        return chain_E_Gs_Gt.cpu()
+
+    def compute_lp_metrics(self, stage):
+        chain_metrics = self.lp_metric_dict[stage].compute()
+        for key, val in chain_metrics.items():
+            if self.infer:
+                val = val.reshape(self.T // self.cfg.general.save_chain_every_steps, -1)
+                chain_metrics[key] = val.mean(-1)
+            else:
+                for metric_name, metric in val.items():
+                    metric = metric.reshape(self.T // self.cfg.general.save_chain_every_steps, -1)
+                    chain_metrics[key][metric_name] = metric.mean(-1)
+
+        auroc_G0 = self.lp_metric_dict[stage].compute_auroc()
+        if self.infer:
+            chain_metrics['auroc'] = auroc_G0
+        else:
+            chain_metrics['G0']['auroc'] = auroc_G0
+        
+        self.store_lp_results(chain_metrics, stage, f"{self.current_epoch}.pkl")
+        
+        return auroc_G0
+
+    def store_lp_results(self, data, stage, filename):
+        if self.cfg.general.save_chain_results:
+            _dir = os.path.join(self.cfg.general.save_chain_results, self.name, stage)
+            if not os.path.exists(_dir):
+                os.makedirs(_dir)
+            with open(os.path.join(_dir, filename), 'wb') as f:
+                pickle.dump(data, f)
+        
+
+    """""""""""""""""""""""""""""""""""""""""""""""""""""""""
+    Unused codes below. Keep here for potential future usage
+    """""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
     def kl_prior(self, X, E, node_mask):
         """Computes the KL between q(z1 | x) and the prior p(z1) = Normal(0, 1).
@@ -518,92 +769,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                       'alpha_t_bar': alpha_t_bar, 'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 'node_mask': node_mask}
         return noisy_data
 
-    def get_dataset(self, stage):
-        if stage == 'train':
-            dataset = self.trainer.datamodule.train_dataset
-        elif stage == 'val':
-            dataset = self.trainer.datamodule.val_dataset
-        else:
-            dataset = self.trainer.datamodule.test_dataset
-        return dataset
-    
-    def get_graph_prob_t_s(self, stage, batch, s, t, node_mask):
-        """
-        This function is to compute Q(G_t | X) and Q(G_s | X)
-        if the sample_forward is enables, X is a sample of Q(E),
-        if not, X is Q(E) itself.
-        """
-        eigval_pow_cumsum, eigvec, edge_prob = batch['eigval_pow_cumsum'], batch['eigvec'], batch['g'].edge_attr
-
-        eigval_pow_cumsum_t = [_eigval_pow_cumsum[_t.int().item()] for _eigval_pow_cumsum, _t in zip(eigval_pow_cumsum, t)]
-        eigval_pow_cumsum_s = [_eigval_pow_cumsum[_s.int().item()] for _eigval_pow_cumsum, _s in zip(eigval_pow_cumsum, s)]
-
-        if not self.cfg.model.sample_forward:
-            E = edge_prob
-
-        probE_t = self.transition_model.forward_diffusion(
-            E,
-            eigval_pow_cumsum_t,
-            eigvec,
-            node_mask,
-            self.cfg.model.sample_forward
-        )
-
-        probE_s = self.transition_model.forward_diffusion(
-            E,
-            eigval_pow_cumsum_s,
-            eigvec,
-            node_mask,
-            self.cfg.model.sample_forward
-        )
-
-        return probE_t, probE_s
-
-    def process_prob_t_s(self, X, E, probE_t, probE_s, y, node_mask):
-        """
-        This function is to sample G_t and G_s from probE_t and probE_s if enabling sample_forward, otherwise keep edge logits as it.
-        Then results will be stored in PlaceHolder, so that the mask can be easily conducted.
-        Note that X and y are all useless.
-        """
-        if self.cfg.model.sample_forward:
-            sampled_t = diffusion_utils.sample_discrete_features(probX=X, probE=probE_t, node_mask=node_mask)
-            sampled_s = diffusion_utils.sample_discrete_features(probX=X, probE=probE_s, node_mask=node_mask)
-
-            E_t = F.one_hot(sampled_t.E, num_classes=self.Edim_output)
-            E_s = F.one_hot(sampled_s.E, num_classes=self.Edim_output)
-
-            assert (E.shape == E_t.shape == E_s.shape)
-
-            z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
-            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
-        else:
-            z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
-            z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
-
-        return z_t, z_s
-    
-    def apply_noise_ND(self, X, E, y, node_mask, batch, stage, timestamp = None):
-        """ Sample noise and apply it to the data. Adapted from apply_noise """
-
-        # Sample a timestep t.
-        # When evaluating, the loss for t=0 is computed separately
-        lowest_t = 0 if self.training else 1
-        if not timestamp:
-            t_int = torch.randint(lowest_t, self.T, size=(X.size(0), 1), device=X.device).float()  # (bs, 1)
-            # NOTE(jiahang): I make self.T + 1 to self.T to simplify engineering work
-        else:
-            t_int = torch.full(size=(X.size(0), 1), fill_value=timestamp, device=X.device).float()
-        s_int = t_int - 1
-
-        probE_t, probE_s = self.get_graph_prob_t_s(stage, batch, s_int, t_int, node_mask)
-        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
-
-        noisy_data = {'t': t_int, 
-                      'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
-                      'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
-                      'node_mask': node_mask}
-        return noisy_data
-
     def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
         """Computes an estimator for the variational lower bound.
            pred: (batch_size, n, total_features)
@@ -644,39 +809,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                        "loss_term_0": loss_term_0,
                        'batch_test_nll' if test else 'val_nll': nll}, commit=False)
         return nll
-
-    def forward(self, noisy_data, extra_data, node_mask, normalize=False):
-        X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
-        E = torch.cat((noisy_data['E_t'], extra_data.E), dim=3).float()
-        y = torch.hstack((noisy_data['y_t'], extra_data.y)).float()
-        # NOTE(jiahang): we use softmax to normalize binary logits, 
-        ## maybe slightly different from sigmoid and 1 - sigmoid
-        return self.model(X, E, y, node_mask, normalize)
-
-    @torch.no_grad()
-    def sample_chain_E(self, X, E , y, batch, node_mask, stage):
-        """ NOTE(jiahang) adapted from sample_batch
-        Note that, the returned chain is a reversed chain, that is, [t, t-1, t-2, ..., 0]
-        """
-        batch_size = E.shape[0]
-
-        chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
-        chain_E_Gs_Gt = torch.zeros(chain_E_size)
-        chain_E_Gs_G0 = torch.zeros(chain_E_size)
-
-        # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        for s_int in reversed(range(0, self.T, self.cfg.general.save_chain_every_steps)):
-            s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
-            t_array = s_array + 1
-
-            # Sample z_s
-            P_Gs_Gt, Q_Gs_G0= self.get_p_zs_given_zt_ND(stage, X, E, y, batch, s_array, t_array, node_mask)
-            chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
-            chain_E_Gs_G0[s_int // self.cfg.general.save_chain_every_steps] = Q_Gs_G0[..., -1]
-            
-        chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
-        chain_E_Gs_G0 = torch.flip(chain_E_Gs_G0, [0])
-        return chain_E_Gs_Gt.cuda(), chain_E_Gs_G0.cuda()
 
     @torch.no_grad()
     def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
@@ -847,18 +979,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             prob_E,  pred_E.reshape((bs, n, n, -1))
             # NOTE(Jiahang): hack - p(G^t-1 | G^t) and p(X | G^t)
 
-    def get_p_zs_given_zt_ND(self, stage, X, E, y, batch, s, t, node_mask):
-        probE_t, probE_s = self.get_graph_prob_t_s(stage, batch, s, t, node_mask)
-        z_t, z_s = self.process_prob_t_s(X, E, probE_t, probE_s, y, node_mask)
-        noisy_data = {'t': t, 
-                      'X_t': z_t.X, 'E_t': z_t.E, 'y_t': z_t.y, 
-                      'X_s': z_s.X, 'E_s': z_s.E, 'y_s': z_s.y, 
-                      'node_mask': node_mask}
-        extra_data = self.compute_extra_data(noisy_data)
-        pred = self.forward(noisy_data, extra_data, node_mask, normalize=True)
-        return pred.E, z_s.E # P(G^t-1 | G^t), Q(G^t-1 | X)
-        
-
     def compute_extra_data(self, noisy_data):
         """ At every training step (after adding noise) and step in sampling, compute extra information and append to
             the network input. """
@@ -874,46 +994,3 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         extra_y = torch.cat((extra_y, t), dim=1)
 
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
-
-
-    def update_lp_metrics(self, dense_data, batch, node_mask, stage):
-        ''' NOTE(jiahang): 
-        * collect X, G_X = argmax(X), P(G^t-1 | G^t) and P(G_X | G^t)
-        ** P(G^t-1 | G^t) vs X
-        ** P(G^t-1 | G^t) vs G^t-1
-        * target: to measure the performance of reverse process step by step and epoch by epoch
-        ** performance metrics: acc, auroc, prec, rec, cross_entropy 
-        '''
-        X, E, y = dense_data.X, dense_data.E, batch['g'].y
-        chain_E_Gs_Gt, chain_E_Gs_G0 = self.sample_chain_E(X, E, y, batch, node_mask, stage)
-
-        mask_E = (node_mask.unsqueeze(-1).float() @ node_mask.unsqueeze(1).float()).bool().flatten()
-        chain_E_Gs_Gt = chain_E_Gs_Gt.flatten(1) # P(G^t-1 | G^t)
-        chain_E_Gs_G0 = chain_E_Gs_G0.flatten(1) # P(X | G^t)
-        # we only need the edge presence probability as the ground truth
-        ## to compute metrics
-        G0 = E[..., -1].flatten() 
-        self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E)
-        
-
-    def compute_lp_metrics(self, stage):
-        chain_metrics = self.lp_metric_dict[stage].compute()
-
-        # NOTE(jiahang) it seems that validation_step runs 2 batches, making the length
-        ## of metric other than "ce" have save_chain_steps ( T // save_chain_every_steps ) * 2
-        ## we only take the first save_chain_steps. Note that ce takes the average of 2 batches.
-        ## so [acc, prec, rec] and ce are not completely aligned.
-        for key, val in chain_metrics.items():
-            for metric_name, metric in val.items():
-                chain_metrics[key][metric_name] = metric[:self.T // self.cfg.general.save_chain_every_steps]
-
-        if self.cfg.general.save_chain_results:
-            _dir = os.path.join(self.cfg.general.save_chain_results, self.name, stage)
-            if not os.path.exists(_dir):
-                os.makedirs(_dir)
-            with open(os.path.join(_dir, f"{self.current_epoch}.pkl"), 'wb') as f:
-                pickle.dump(chain_metrics, f)
-
-        auroc_G0 = self.lp_metric_dict[stage].compute_auroc()
-        return auroc_G0
-

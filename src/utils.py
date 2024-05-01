@@ -50,7 +50,7 @@ def unnormalize(X, E, y, norm_values, norm_biases, node_mask, collapse=False):
     return PlaceHolder(X=X, E=E, y=y).mask(node_mask, collapse)
 
 
-def to_dense(x, edge_index, edge_attr, batch):
+def to_dense(x, edge_index, edge_attr, batch, y):
     X, node_mask = to_dense_batch(x=x, batch=batch)
     # node_mask = node_mask.float()
     edge_index, edge_attr = torch_geometric.utils.remove_self_loops(edge_index, edge_attr)
@@ -64,7 +64,7 @@ def to_dense(x, edge_index, edge_attr, batch):
     # E = encode_no_edge(E) TODO(jiahang): what is it? seems that we don't need this.
     # NOTE(performance, jiahang): if performance degrades, it could be the problem above. 
 
-    return PlaceHolder(X=X, E=E, y=None), node_mask
+    return PlaceHolder(X=X, E=E, y=y), node_mask
 
 
 def encode_no_edge(E):

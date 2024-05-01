@@ -254,10 +254,11 @@ class NDTransition:
                 E_list.append(new_E)
         else:
             for n_mask, _E, val, vec in zip(node_mask, E, eigval_pow_cumsum, eigvec):
+                _E = _E[..., -1].flatten()
                 e_mask = get_e_mask(n_mask).flatten()
-                new_E = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 1, 2)).double().cuda()
-                new_E[e_mask, 0, 1] = _E
-                new_E[e_mask, 0, 0] = 1 - _E
+                new_E = torch.zeros((len(n_mask) * len(n_mask), 1, 2)).double().cuda()
+                new_E[e_mask, 0, 1] = _E[e_mask]
+                new_E[e_mask, 0, 0] = 1 - _E[e_mask]
                 Qt = torch.zeros((len(node_mask[0]) * len(node_mask[0]), 2, 2)).double().cuda()
                 Qt[e_mask, 1, 0] = 0.
                 Qt[e_mask, 1, 1] = 1.

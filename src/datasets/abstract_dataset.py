@@ -38,7 +38,7 @@ class NewDataLoader(DataLoader):
         for d in data:
             [res[k].append(v) for k, v in d.items()]
         for k, v in res.items():
-            if k != 'g':
+            if k not in ['g', 'golden_g']:
                 continue
             res[k] = self.pyg_collator(v)
         return res

@@ -97,6 +97,56 @@ class LPMetric:
             for item in metric.values():
                 item.reset()
 
+class LPInferMetric:
+    full_state_update = False
+    def __init__(self, stage, num_steps, pos_e_w, device_name='cpu'):
+        super().__init__()
+        self.stage = stage
+
+        self.auroc = AUROC('binary')
+        self.acc = Accuracy('binary', multidim_average='samplewise')
+        self.prec = Precision('binary', multidim_average='samplewise')
+        self.rec = Recall('binary', multidim_average='samplewise')
+        self.ce = CrossEntropy(num_steps, pos_e_w).to(device_name)
+
+    def update(self, G0, chain_E_Gs_Gt, mask_E):
+        # NOTE(jiahang): at the end of each valid and test batch
+
+        G0, chain_E_Gs_Gt = \
+            G0[mask_E], chain_E_Gs_Gt[:, mask_E]
+        num_steps = chain_E_Gs_Gt.shape[0]
+
+        G0_lbls = G0.expand(num_steps, -1).clone()
+        # NOTE(jiahang): we only compute the auroc of 0-th step since auroc not support samplewise.
+        ## so these two auroc should be the same
+        self.auroc.update(chain_E_Gs_Gt[-1, :], G0_lbls[-1, :])
+        self.acc.update(chain_E_Gs_Gt, G0_lbls)
+        self.prec.update(chain_E_Gs_Gt, G0_lbls)
+        self.rec.update(chain_E_Gs_Gt, G0_lbls)
+        self.ce.update(chain_E_Gs_Gt, G0_lbls) # Note that at this case G0 == G0_lbls with different shapes
+
+    def compute(self):
+        # NOTE(jiahang): at the end of each valid and test epoch. test has only one epoch.
+        chain_metrics = {}
+
+        chain_metrics.update({
+                'acc': self.acc.compute().cpu(),
+                'prec': self.prec.compute().cpu(),
+                'rec': self.rec.compute().cpu(),
+                'ce': self.ce.compute().cpu()
+            }
+        )
+
+        return chain_metrics
+
+    def compute_auroc(self):
+        # auroc[ p(G0 | G1), q(G0) ]
+        return self.auroc.compute().item()
+
+    def reset(self):
+        for metric in [self.auroc, self.acc, self.prec, self.rec, self.ce]:
+            metric.reset()
+
 class CrossEntropy(Metric):
     # This class can only be used in LPMetric!
     # Please refer to src/metrics/abstract_metrics.py - CrossEntropyMetric for using
