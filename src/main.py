@@ -108,6 +108,7 @@ def main(cfg: DictConfig):
                         'extra_features': extra_features, 'domain_features': domain_features}
 
     wandb_status = cfg.general.wandb
+    infer = cfg.general.infer
     if cfg.general.test_only:
         # When testing, previous configuration is fully loaded
         cfg, _ = get_resume(cfg, model_kwargs)
@@ -117,6 +118,7 @@ def main(cfg: DictConfig):
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
     cfg.general.wandb = wandb_status # to avoid wandb status is replaced when simply debugging checkpoint
+    cfg.general.infer = infer # we use the current infer flag
 
     utils.create_folders(cfg)
 
@@ -162,7 +164,7 @@ def main(cfg: DictConfig):
                       num_sanity_val_steps=-1)
 
     if cfg.general.test_only:
-         trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
+        trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
     else:
         trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
         trainer.test(model, datamodule=datamodule, ckpt_path='best')
