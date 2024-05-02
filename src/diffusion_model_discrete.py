@@ -560,7 +560,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         chain_E_Gs_G0 = chain_E_Gs_G0.flatten(1) # P(X | G^t)
         # we only need the edge presence probability as the ground truth
         ## to compute metrics
-        G0 = E[..., -1].flatten() 
+        G0 = E[..., -1].flatten()
         self.lp_metric_dict[stage].update(G0, chain_E_Gs_Gt, chain_E_Gs_G0, mask_E)
         return chain_E_Gs_Gt.cpu(), chain_E_Gs_G0.cpu()
 
@@ -587,12 +587,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         chain_metrics = self.lp_metric_dict[stage].compute()
         for key, val in chain_metrics.items():
             if self.infer:
-                val = val.reshape(self.T // self.cfg.general.save_chain_every_steps, -1)
-                chain_metrics[key] = val.mean(-1)
+                val = val.reshape(-1, self.T // self.cfg.general.save_chain_every_steps)
+                chain_metrics[key] = val.mean(0)
             else:
                 for metric_name, metric in val.items():
-                    metric = metric.reshape(self.T // self.cfg.general.save_chain_every_steps, -1)
-                    chain_metrics[key][metric_name] = metric.mean(-1)
+                    metric = metric.reshape(-1, self.T // self.cfg.general.save_chain_every_steps)
+                    chain_metrics[key][metric_name] = metric.mean(0)
 
         auroc_G0 = self.lp_metric_dict[stage].compute_auroc()
         if self.infer:
