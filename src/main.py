@@ -23,10 +23,11 @@ from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
 
-def get_resume(cfg, model_kwargs):
+def get_resume(cfg, model_kwargs, infer):
     """ Resumes a run. It loads previous config without allowing to update keys (used for testing). """
     saved_cfg = cfg.copy()
-    name = cfg.general.name + '_resume'
+    suffix = '_test' if not infer else '_infer'
+    name = cfg.general.name + suffix
     resume = cfg.general.test_only
     from torch.distributed import init_process_group
     import os
@@ -111,7 +112,7 @@ def main(cfg: DictConfig):
     infer = cfg.general.infer
     if cfg.general.test_only:
         # When testing, previous configuration is fully loaded
-        cfg, _ = get_resume(cfg, model_kwargs)
+        cfg, _ = get_resume(cfg, model_kwargs, infer)
         os.chdir(cfg.general.test_only.split('checkpoints')[0])
     elif cfg.general.resume is not None:
         # When resuming, we can override some parts of previous configuration

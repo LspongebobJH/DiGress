@@ -295,7 +295,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             dense_gold = dense_gold.mask(node_mask)
 
             chain_E_Gs_Gt = self.update_lp_metrics_infer(dense_g, dense_gold, eig, node_mask)
-            self.chain_E_Gs_Gt_list_infer.append(chain_E_Gs_Gt)
+            e_mask = utils.get_e_mask(node_mask).flatten().cpu()
+            self.chain_E_Gs_Gt_list_infer.append(chain_E_Gs_Gt[:, e_mask])
                 
         else:
             g = batch['g']
@@ -308,8 +309,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             # nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, g.y, node_mask, test=True)
             eig = {'eigval_pow_cumsum': batch['eigval_pow_cumsum'], 'eigvec': batch['eigvec']}
             chain_E_Gs_Gt, chain_E_Gs_G0 = self.update_lp_metrics(dense_data, batch, node_mask, 'test')
-            self.chain_E_Gs_Gt_list_test.append(chain_E_Gs_Gt)
-            self.chain_E_Gs_G0_list_test.append(chain_E_Gs_G0)
+            e_mask = utils.get_e_mask(node_mask).flatten().cpu()
+            self.chain_E_Gs_Gt_list_test.append(chain_E_Gs_Gt[:, e_mask])
+            self.chain_E_Gs_G0_list_test.append(chain_E_Gs_G0[:, e_mask])
 
         return {'loss': 0.0}
 
