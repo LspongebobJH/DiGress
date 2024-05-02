@@ -100,7 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('--epoch_end', default=20, type=int)
     parser.add_argument('--epoch_interval', default=10, type=int)
     parser.add_argument('--stages', nargs='+', default=['valid', 'test', 'infer'])
-    parser.add_argument('--only_auroc', type=bool, default=False)
+    parser.add_argument('--only_auroc', default=False, action='store_true')
 
     args = parser.parse_args()
 
@@ -113,12 +113,13 @@ if __name__ == '__main__':
         path = os.path.join(root_path, stage)
         metrics, idx_list = read_metrics(path)
         if stage == 'valid':
-            df_Gs, df_G0 = process_metrics_valid(metrics, args.epoch_start, args.epoch_end, args.epoch_interval)
-            fig_Gs = px.line(df_Gs, x="step_idx", y="value", color='epoch_idx', facet_col='metric')
-            fig_G0 = px.line(df_G0, x="step_idx", y="value", color='epoch_idx', facet_col='metric')
+            if not args.only_auroc:
+                df_Gs, df_G0 = process_metrics_valid(metrics, args.epoch_start, args.epoch_end, args.epoch_interval)
+                fig_Gs = px.line(df_Gs, x="step_idx", y="value", color='epoch_idx', facet_col='metric')
+                fig_G0 = px.line(df_G0, x="step_idx", y="value", color='epoch_idx', facet_col='metric')
 
-            fig_Gs.write_html(os.path.join(root_path, 'vis', f'Gs_{stage}.html'))
-            fig_G0.write_html(os.path.join(root_path, 'vis', f'G0_{stage}.html'))
+                fig_Gs.write_html(os.path.join(root_path, 'vis', f'Gs_{stage}.html'))
+                fig_G0.write_html(os.path.join(root_path, 'vis', f'G0_{stage}.html'))
 
             auroc_dict = {}
             for metric, idx in zip(metrics, idx_list):
@@ -126,12 +127,13 @@ if __name__ == '__main__':
             print(f"{stage} G0 AUROC: {auroc_dict}")
 
         elif stage == 'test':
-            df_Gs, df_G0 = process_metrics_test(metrics)
-            fig_Gs = px.line(df_Gs, x="step_idx", y="value", facet_col='metric')
-            fig_G0 = px.line(df_G0, x="step_idx", y="value", facet_col='metric')
+            if not args.only_auroc:
+                df_Gs, df_G0 = process_metrics_test(metrics)
+                fig_Gs = px.line(df_Gs, x="step_idx", y="value", facet_col='metric')
+                fig_G0 = px.line(df_G0, x="step_idx", y="value", facet_col='metric')
 
-            fig_Gs.write_html(os.path.join(root_path, 'vis', f'Gs_{stage}.html'))
-            fig_G0.write_html(os.path.join(root_path, 'vis', f'G0_{stage}.html'))
+                fig_Gs.write_html(os.path.join(root_path, 'vis', f'Gs_{stage}.html'))
+                fig_G0.write_html(os.path.join(root_path, 'vis', f'G0_{stage}.html'))
             print(f"{stage} G0 AUROC: {metrics[0]['G0']['auroc']}")
 
         elif stage == 'infer':
