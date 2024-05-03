@@ -117,9 +117,11 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         # NOTE(jiahang): to compute metrics relevant to link prediction
         config = {'num_steps': self.T // self.cfg.general.save_chain_every_steps, 'pos_e_w': self.cfg.model.pos_e_w,
                   'device_name': self.device_name}
+        config_infer = {'num_steps': self.T - 1, 'pos_e_w': self.cfg.model.pos_e_w,
+                  'device_name': self.device_name}
         self.lp_metric_valid = LPMetric(stage='val', **config)
         self.lp_metric_test = LPMetric(stage='test', **config)
-        self.lp_metric_infer = LPInferMetric(stage='infer', **config)
+        self.lp_metric_infer = LPInferMetric(stage='infer', **config_infer)
         self.lp_metric_dict = {'valid': self.lp_metric_valid, 'test': self.lp_metric_test, 'infer': self.lp_metric_infer}
         self.chain_E_Gs_Gt_list_test, self.chain_E_Gs_G0_list_test = [], []
         self.chain_E_Gs_Gt_list_infer = []
@@ -433,21 +435,24 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         batch_size = E.shape[0]
 
         chain_E_size = torch.Size((self.T // self.cfg.general.save_chain_every_steps, batch_size, E.size(1), E.size(2)))
-        chain_E_Gs_Gt = torch.zeros(chain_E_size)
         chain_E_Gs_G0 = torch.zeros(chain_E_size)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         if self.infer:
-            for t_int in reversed(range(1, self.T, self.cfg.general.save_chain_every_steps)):
+            chain_E_Gs_Gt = torch.zeros(
+                torch.Size((self.T - 1, batch_size, E.size(1), E.size(2)))
+            )
+            for t_int in reversed(range(1, self.T)):
                 s_int = t_int - 1
                 t_array = t_int * torch.ones((batch_size, 1)).type_as(y)
                 P_Gs_Gt = self.get_p_st(X, E, y, t_array, node_mask)
-                chain_E_Gs_Gt[s_int // self.cfg.general.save_chain_every_steps] = P_Gs_Gt[..., -1]
+                chain_E_Gs_Gt[s_int] = P_Gs_Gt[..., -1]
                 E = P_Gs_Gt
 
             chain_E_Gs_Gt = torch.flip(chain_E_Gs_Gt, [0])
             return chain_E_Gs_Gt.cuda()
         else:
+            chain_E_Gs_Gt = torch.zeros(chain_E_size)
             for s_int in reversed(range(0, self.T - 1, self.cfg.general.save_chain_every_steps)):
                 s_array = s_int * torch.ones((batch_size, 1)).type_as(y)
                 t_array = s_array + 1
@@ -513,7 +518,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             assert (E.shape == E_t.shape == E_s.shape)
 
             z_t = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
-            z_s = utils.PlaceHolder(X=X, E=E_t, y=y).type_as(X).mask(node_mask)
+            z_s = utils.PlaceHolder(X=X, E=E_s, y=y).type_as(X).mask(node_mask)
         else:
             z_t = utils.PlaceHolder(X=X, E=probE_t, y=y).type_as(X).mask(node_mask)
             z_s = utils.PlaceHolder(X=X, E=probE_s, y=y).type_as(X).mask(node_mask)
@@ -589,7 +594,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         chain_metrics = self.lp_metric_dict[stage].compute()
         for key, val in chain_metrics.items():
             if self.infer:
-                val = val.reshape(-1, self.T // self.cfg.general.save_chain_every_steps)
+                val = val.reshape(-1, self.T - 1)
                 chain_metrics[key] = val.mean(0)
             else:
                 for metric_name, metric in val.items():
