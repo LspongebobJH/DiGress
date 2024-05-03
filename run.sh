@@ -29,13 +29,14 @@ elif [ "$1" == "draw-valid-test" ]; then
 
 elif [ "$1" == "draw-infer" ]; then
     echo 'draw-infer'
+    addr="chain_results/2024-05-01/16-00-27-protein-2_infer/protein-2_infer"
     if [ "$2" == "only_auroc" ]; then
         python3 scripts/draw_reverse_metrics.py \
-        --path /home/jiahang/DiGress/chain_results/2024-05-02/07-54-50-protein-3_infer/protein-3_infer \
+        --path $addr \
         --stage infer --epoch_end 20 --only_auroc
     else
         python3 scripts/draw_reverse_metrics.py \
-        --path /home/jiahang/DiGress/chain_results/2024-05-02/07-54-50-protein-3_infer/protein-3_infer \
+        --path $addr \
         --stage infer --epoch_end 20
     fi
 
