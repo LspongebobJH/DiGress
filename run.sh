@@ -10,7 +10,7 @@ elif [ "$1" == "infer" ]; then
     # infer
     echo 'infer'
     python3 src/main.py +experiment=protein general.name=$name general.infer=true \
-    'general.test_only=/home/jiahang/DiGress/outputs/2024-05-01/16-00-27-protein-2/checkpoints/protein-2/epoch\=9.ckpt' \
+    'general.test_only=/home/jiahang/DiGress/outputs/2024-05-03/02-13-00-protein-4/checkpoints/protein-4/epoch\=49.ckpt' \
     general.wandb=disabled dataset.slope=50
 
 elif [ "$1" == "draw-valid-test" ]; then

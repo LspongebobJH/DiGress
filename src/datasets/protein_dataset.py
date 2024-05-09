@@ -177,7 +177,7 @@ class ProteinDataset(InMemoryDataset):
         return data
 
 class ProteinGoldenDataset(InMemoryDataset):
-    def __init__(self, root, force_reload):
+    def __init__(self, root, force_reload=False):
         self.network_path = root
         self.force_reload = force_reload
         super().__init__(root = root)
